@@ -211,8 +211,10 @@ def debug_mem(top: int = 15):
     import tracemalloc
     gc.collect()
     rss = int(open("/proc/self/statm").read().split()[1]) * 4096 / 2**20
-    out = {"rss_mb": round(rss), "rss_growth_mb": round(rss - _MEM_SNAP.get("rss", rss))}
-    _MEM_SNAP["rss"] = rss
+    gpu = torch.cuda.memory_allocated() / 2**20
+    out = {"rss_mb": round(rss), "rss_growth_mb": round(rss - _MEM_SNAP.get("rss", rss)),
+           "gpu_mb": round(gpu), "gpu_growth_mb": round(gpu - _MEM_SNAP.get("gpu", gpu)), "threads": threading.active_count()}
+    _MEM_SNAP["rss"], _MEM_SNAP["gpu"] = rss, gpu
     if tracemalloc.is_tracing():
         snap = tracemalloc.take_snapshot()
         prev = _MEM_SNAP.get("snap")

@@ -130,6 +130,8 @@ never disturb a live conversation. `dev/test_api.py` exercises every endpoint.
 | End-of-turn pause | 500 ms | Silence that ends your turn (when Smart Turn is off or unsure). Lower = snappier, but more likely to cut you off. |
 | Extra pause after short phrases | 250 ms | Added when you've said < 1 s ("Can you tell me…"), which is usually unfinished. |
 | Start thinking after | 32 ms | When speculative generation starts (it is discarded if you keep talking). |
+| Keep my turn if I resume within | 1000 ms | If you carry on talking this soon after it starts answering, the answer is withdrawn and everything you said is answered as one turn (0 = carrying on interrupts it). |
+| Ignore the assistant's own voice | on | Echo-aware barge-in for speakers: its own voice coming back through the mic doesn't count as you talking. |
 | Voice detection sensitivity | 0.50 | Silero VAD threshold. |
 | Playback buffer | 100 ms | Client jitter buffer. |
 
