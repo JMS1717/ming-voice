@@ -94,18 +94,19 @@ async def main():
             pause_ms = None
             deadline = time.perf_counter() + 90
             while time.perf_counter() < deadline:
+                # talk over the reply once it has *played* for interrupt_after seconds (audio arrives faster)
+                if (interrupt_with is not None and not sent_interrupt and first_audio is not None
+                        and time.perf_counter() - first_audio >= interrupt_after):
+                    sent_interrupt = True
+                    mic.say(interrupt_with)
                 try:
-                    t, m = await asyncio.wait_for(events.get(), timeout=1.0)
+                    t, m = await asyncio.wait_for(events.get(), timeout=0.02)
                 except asyncio.TimeoutError:
                     continue
                 if isinstance(m, bytes):
                     if first_audio is None:
                         first_audio = t
                     pcm.append(np.frombuffer(m, "<i2").astype(np.float32) / 32768)
-                    if (interrupt_with is not None and not sent_interrupt
-                            and sum(len(p) for p in pcm) / 44100 >= interrupt_after):
-                        sent_interrupt = True
-                        mic.say(interrupt_with)
                     continue
                 ev = json.loads(m)
                 if ev["type"] == "text":

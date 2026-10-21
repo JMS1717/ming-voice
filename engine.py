@@ -615,12 +615,14 @@ class Thinker:
         self.cur_len = 0
         self.pending = None  # text to prepend before the next human turn
         self.history: list[dict] = []
+        self.epoch = getattr(self, "epoch", 0) + 1  # the cache was cleared: older snapshots can't be restored as-is
+        self.rebuild = False  # next turn re-enters the history as text (after restoring across a reset)
 
     def snapshot(self):
         """Cheap copy of the conversation state (recurrent KDA states + positions) for rollback."""
         kda = [(st.keys.clone(), tuple(c.clone() for c in st.values)) if isinstance(st, _KDAState) else None
                for st in self._layers]
-        return dict(cur_len=self.cur_len, pending=self.pending, n_hist=len(self.history), kda=kda)
+        return dict(cur_len=self.cur_len, pending=self.pending, n_hist=len(self.history), kda=kda, epoch=self.epoch)
 
     @contextmanager
     def isolated(self):
@@ -630,7 +632,7 @@ class Thinker:
         n = self.cur_len
         saved = [(st.keys.clone(), tuple(c.clone() for c in st.values)) if isinstance(st, _KDAState)
                  else (st.k[:, :, :n].clone(), st.v[:, :, :n].clone()) for st in self._layers]
-        meta = (self.cur_len, self.pending, list(self.history), self.system_prompt)
+        meta = (self.cur_len, self.pending, list(self.history), self.system_prompt, self.epoch, self.rebuild)
         try:
             yield self
         finally:
@@ -642,9 +644,16 @@ class Thinker:
                 else:
                     st.k[:, :, :n].copy_(a)
                     st.v[:, :, :n].copy_(b)
-            self.cur_len, self.pending, self.history, self.system_prompt = meta
+            self.cur_len, self.pending, self.history, self.system_prompt, self.epoch, self.rebuild = meta
 
     def restore(self, snap):
+        if snap["epoch"] != self.epoch:
+            # the context rolled over (cache rebuilt) after the snapshot: its KV prefix is gone, so start a fresh
+            # cache and bring the surviving turns back as text on the next turn
+            hist = self.history[:snap["n_hist"]]
+            self.reset()
+            self.history, self.rebuild = hist, bool(hist)
+            return
         for st, saved in zip(self._layers, snap["kda"]):
             if saved is not None:
                 st.keys.copy_(saved[0])
@@ -776,6 +785,9 @@ class Thinker:
             hist = self.history
             self.reset()
             self.history = hist
+        elif self.cur_len == 0 and self.rebuild and self.history:
+            rollover = self._rollover_text(budget=self.max_ctx // 2 - n_tail)
+        self.rebuild = False
         first = self.cur_len == 0
         prefix = (self._system_block() + (rollover or history_text)) if first else (self.pending or "")
         ids = self.tok(prefix + tail, return_tensors="pt", add_special_tokens=first).input_ids.to(DEVICE)

@@ -9,7 +9,10 @@ typically starting to speak **~0.3 s after you stop talking**.
 * **Smart turn detection** ([Smart Turn v3](https://huggingface.co/pipecat-ai/smart-turn-v3)): judges from your
   words and intonation whether you've finished, answering sooner when you have and waiting when you're mid-sentence
 * **Speculative turn-taking**: the reply starts generating during your pause and is discarded if you keep talking
-* Barge-in: talk over the assistant to interrupt it
+* **Resume after a pause**: if it starts answering and you carry on within a second, the answer is withdrawn,
+  the conversation rolls back, and everything you said is answered as one turn
+* Barge-in: talk over the assistant to interrupt it, **even on a speakerphone**: the server recognises its own
+  voice leaking back into the mic (echo-aware barge-in) and only stops for yours
 * Streaming speech output (audio starts after the first ~160 ms of speech are generated)
 * Multi-turn memory with KV-cache reuse, automatic rollover to a text history for long chats
 * 7 built-in voices plus **voice cloning** from a 5–15 s sample
@@ -68,8 +71,8 @@ you're done: it holds ~20 GB of VRAM and keeps the GPU out of its deepest idle s
 ## Using it
 
 * **Start conversation**, allow the microphone, talk, and pause when you're done.
-* Interrupt by talking over it. With speakers instead of headphones, turn **barge-in** off if it interrupts
-  itself.
+* Interrupt by talking over it. This works on speakers too: the server ignores its own voice coming back
+  through the mic. If it still interrupts itself in a very echoey room, turn **barge-in** off in Settings.
 * Shortcuts: <kbd>Space</kbd> hold to talk (push-to-talk mode), <kbd>M</kbd> mute, <kbd>Esc</kbd> stop reply,
   <kbd>N</kbd> new conversation.
 * **Clone a voice** in the sidebar: record or upload 5–15 s of one person speaking. Voices are saved in
@@ -145,6 +148,7 @@ never disturb a live conversation. `dev/test_api.py` exercises every endpoint.
 | `MING_SMART_TURN` | `1` | Smart Turn end-of-turn detection (needs `model_extra/smart-turn-v3.2-cpu.onnx`, downloaded by `setup_env.sh`). |
 | `MING_FUSED_PREFILL` | `1` | Grouped Triton MoE kernels for prompt prefill (`0` = the reference per-expert loop). |
 | `MING_FUSED_OPS` | `1` | Triton RMSNorm and one-token MoE router (`0` = the reference PyTorch ops). |
+| `MING_ECHO_DEBUG` | unset | Log what the echo guard measured (correlation, delay, levels) whenever a barge-in fires. |
 | `MING_FAST_TALKER` / `MING_GRAPHS` | `1` / `1` | Fused Triton Talker path / HIP graphs (set `0` to fall back to the reference code). |
 | `MING_TRACEMALLOC` | `0` | Python allocation tracing for `/api/debug/mem`. |
 
@@ -153,11 +157,13 @@ never disturb a live conversation. `dev/test_api.py` exercises every endpoint.
 ```
 browser (static/index.html) ⇄ WebSocket: 16 kHz PCM in / 44.1 kHz PCM out ⇄ server.py
   server.py   Silero VAD · Smart Turn (turn_detect.py) · speculative turn-taking with rollback · barge-in
+              · resume (a reply you talk over within resume_ms is undone and your turn continues)
+              · echo guard (echo_guard.py: mic vs. played-audio correlation, so its own voice can't barge in)
               · push-to-talk · voice cloning · background transcription
   api.py      OpenAI-compatible /v1 API (speech, transcriptions, chat with audio in/out)
   lan.py      access key + cookie login for the LAN port; windows/lan_proxy.py terminates HTTPS on Windows
   engine.py   Thinker: Ming audio LLM (hybrid Kimi-delta-attention / MLA, 128-expert MoE)
-                - static-state cache, one HIP graph per attention-length bucket (14 ms/token)
+                - static-state cache, one HIP graph per attention-length bucket (8.7 ms/token)
                 - fused Triton MoE with the shared expert folded in (fused_moe.py): a GEMV kernel pair
                   for decode, grouped tl.dot kernels for prefill (tokens sorted by expert on the GPU)
                 - multi-turn KV reuse, snapshot/restore for speculation, text-history rollover
@@ -197,6 +203,10 @@ turn, now ~15 ms), graph-capturing every per-token step, and hiding model latenc
 * `dev/test_moe_prefill.py` (`TUNE=1` to re-tune), `dev/test_prefill.py`, `dev/test_prefill_layer.py` — fused
   prefill MoE: accuracy vs. fp32, replies, time to first token
 * `dev/test_turn.py` — Smart Turn scores on complete vs. truncated questions
+* `dev/test_resume.py` — pause mid-question until the reply starts, then continue: one answer to the whole
+  question, nothing left of the withdrawn reply; late interruptions still interrupt
+* `dev/echo_test.py` — speakerphone simulation: the reply leaks back into the "mic" at several levels and delays;
+  must never interrupt itself, but must still stop for a real interruption (`dev/test_echo_guard.py`: offline)
 * `dev/test_api.py` — every `/v1` endpoint, plus a live WebSocket conversation that must survive the API calls
   (`BASE=https://<pc-ip>:8443 KEY=… python dev/test_api.py` from another machine)
 * `dev/test_encoder.sh`, `dev/profile_prefill.py` — audio encoder (trimmed chunks, flash attention) and prefill timing

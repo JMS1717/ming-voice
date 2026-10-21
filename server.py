@@ -40,7 +40,10 @@ from fastapi.responses import FileResponse, JSONResponse
 
 import api
 import lan
+from echo_guard import EchoGuard
 from engine import DEFAULT_SYSTEM_PROMPT, Fragmenter, GpuKeepAwake, Talker, Thinker, log
+
+ECHO_DEBUG = bool(os.environ.get("MING_ECHO_DEBUG"))
 
 VOICES = ["US_Stella", "US_Emma", "US_James", "UK_George", "UK_Charlotte", "灵小柔", "灵楷"]
 VOICE_DIR = HERE / "voices"  # cloned voices: tiny speaker-embedding files
@@ -316,6 +319,9 @@ class Reply:
         self.t_start = time.perf_counter()
         self.t_commit = None if speculative else self.t_start
         self.t_first_audio_sent = None
+        self.snap = None  # conversation state before this turn (for undo)
+        self.undone = False  # retracted: the user kept talking right after it started answering
+        self.finished = False
         if not speculative:
             self.decided.set()
         self.worker = threading.Thread(target=sess._run_reply, args=(self,), daemon=True)
@@ -335,7 +341,10 @@ class Reply:
         self.sess._put(kind, payload)
         if dur:
             now = time.time()
-            self.sess.play_until = max(self.sess.play_until, now) + dur
+            start = max(self.sess.play_until, now)
+            self.sess.play_until = start + dur
+            if kind == "bytes":
+                self.sess.echo_reference(payload, start)
 
     def commit(self, user_end_msg):
         with self.lock:
@@ -378,9 +387,19 @@ class Session:
         self.slow_end_ms = 1500
         self.turn_fut = None
         self.turn_p = None
+        # Echo guard: ignore the assistant's own voice coming back through the mic (speakerphones)
+        self.echo = EchoGuard()
+        self.echo_lock = threading.Lock()
+        self.echo_guard = True
+        self.echo_trace = []
         self.threshold = 0.5
         self.barge_threshold = 0.75
         self.barge_ms = 250
+        # Resume: if you keep talking within this long after it starts answering, the answer is withdrawn and
+        # what you say is joined to the same turn (you only paused). 0 = always treat it as an interruption.
+        self.resume_ms = 1000
+        self.undo_lock = threading.Lock()
+        self.pending_restore = None  # snapshot to restore before the next turn (undo of a finished reply)
         self.mode = "vad"  # "vad" (hands-free) or "ptt" (push-to-talk)
         self.ptt_down = False
         self.reply: Reply | None = None
@@ -411,9 +430,58 @@ class Session:
         live = r is not None and r.committed and r.active and not r.cancel.is_set()
         return live or time.time() < self.play_until
 
+    def echo_reference(self, pcm16_44k: bytes, start: float):
+        """Record what the client will play (16 kHz) and when, for the echo guard. Called from reply threads."""
+        x = torch.from_numpy(np.frombuffer(pcm16_44k, dtype="<i2").astype(np.float32) / 32768.0)
+        y = torchaudio.functional.resample(x, Talker.SR, 16000).numpy()
+        with self.echo_lock:
+            self.echo.add_playback(y, start)
+
+    def _is_echo(self, f: np.ndarray) -> bool:
+        if not self.echo_guard:
+            return False
+        now = time.time()
+        with self.echo_lock:
+            if not self.echo.active(now):
+                return False
+            self.echo.push_mic(f, now)
+            e = self.echo.is_echo(now)
+            if ECHO_DEBUG:
+                g = self.echo
+                self.echo_trace.append((round(g.rho, 2), g.lag, round(g.mic_rms, 4), round(g.ref_rms, 4),
+                                        None if g.erl is None else round(g.erl, 3), e))
+                self.echo_trace = self.echo_trace[-24:]
+            return e
+
+    def _resume_turn(self):
+        """The user started talking again right after the reply began: they had only paused. Withdraw the
+        reply (the client drops it), roll the conversation back and return the earlier utterance so it can be
+        joined with what follows. None if this is a real interruption."""
+        r = self.reply
+        if (not self.resume_ms or r is None or not r.committed or r.audio is None or r.user_text is not None
+                or r.t_commit is None):
+            return None
+        onset_ms = (time.perf_counter() - r.t_commit) * 1000 - self.barge_ms - 100  # detection lags the onset
+        if onset_ms > self.resume_ms:
+            return None
+        with self.undo_lock:
+            r.undone = True
+            r.cancel.set()
+            if r.finished:  # its worker is done: roll back before the next turn instead
+                self.pending_restore = r.snap
+        self.asr_cancel.set()
+        with self.echo_lock:
+            self.echo.truncate(time.time() + 0.25)
+        self.play_until = 0.0
+        self.emit_json({"type": "retract", "id": r.id})
+        log(f"resumed: the user kept talking {max(0, onset_ms):.0f} ms after the reply started; joined into one turn")
+        return r.audio
+
     def interrupt(self, reason="barge-in"):
         if self.reply is not None:
             self.reply.cancel.set()
+        with self.echo_lock:
+            self.echo.truncate(time.time() + 0.25)  # the client stops playing; what is in flight still echoes
         self.play_until = 0.0
         self.emit_json({"type": "interrupt", "reason": reason})
 
@@ -434,26 +502,38 @@ class Session:
                 self.frames.append(f)
             return
         p = float(self.vad(torch.from_numpy(f), 16000).item())
+        echo = self._is_echo(f)
         if self.responding:
             if not self.barge_in:
                 return
             # require confident, sustained speech to barge in (helps against echo)
             self.preroll.append(f)
             self.preroll = self.preroll[-20:]  # 640 ms: confident-speech detection lags the onset
-            self.speaking_frames = self.speaking_frames + 1 if p >= self.barge_threshold else 0
+            if p < self.barge_threshold:
+                self.speaking_frames = 0
+            elif echo:  # the assistant's own voice: does not count (and slowly cancels earlier counts)
+                self.speaking_frames = max(0, self.speaking_frames - 1)
+            else:
+                self.speaking_frames += 1
+            if ECHO_DEBUG:
+                self.echo_trace[-1:] = [self.echo_trace[-1] + (round(p, 2), self.speaking_frames)] if self.echo_trace else []
             if self.speaking_frames * FRAME / 16 >= self.barge_ms:
-                self.interrupt()
+                if ECHO_DEBUG:
+                    log(f"barge-in; echo trace (rho, lag, mic, ref, erl, echo, p, n): {self.echo_trace}")
+                prev = self._resume_turn()
+                if prev is None:
+                    self.interrupt()
                 self.speaking_frames = 0
                 self.reset_listen()
                 self.in_speech = True
-                self.frames = list(self.preroll)
+                self.frames = ([prev] if prev is not None else []) + list(self.preroll)
                 self.speech_frames = len(self.frames)
                 self.emit_json({"type": "vad", "state": "speech"})
             return
         if not self.in_speech:
             self.preroll.append(f)
             self.preroll = self.preroll[-10:]  # 320 ms pre-roll
-            if p >= self.threshold:
+            if p >= self.threshold and not echo:  # (echo: the tail of the reply still coming back)
                 self.asr_cancel.set()
                 self.in_speech = True
                 self.frames = list(self.preroll)
@@ -543,9 +623,13 @@ class Session:
     def _run_reply(self, r: Reply):
         th, tk = ENGINE["thinker"], ENGINE["talker"]
         with GPU_TURN:
+            with self.undo_lock:
+                pending, self.pending_restore = self.pending_restore, None
+            if pending is not None:
+                th.restore(pending)
             if r.cancel.is_set():
                 return
-            snap = th.snapshot() if r.speculative else None
+            snap = r.snap = th.snapshot()
             try:
                 self._generate(r, th, tk)
             finally:
@@ -553,8 +637,13 @@ class Session:
                     r.decided.wait(timeout=10)
                     if not r.committed:
                         th.restore(snap)
-            if r.committed and r.audio is not None and len(r.audio) > 4000:
+            if r.committed and not r.undone and r.audio is not None and len(r.audio) > 4000:
                 self._transcribe_user(r, th)
+            with self.undo_lock:  # (restore outside the lock: the event loop takes it)
+                r.finished = True
+                undo = r.undone and r.committed
+            if undo:
+                th.restore(snap)
 
     def _transcribe_user(self, r: Reply, th: Thinker):
         """Background ASR of the user's utterance (for the transcript and context rollover).
@@ -651,6 +740,8 @@ class Session:
                 self.voice = msg["voice"]
             if "barge_in" in msg:
                 self.barge_in = bool(msg["barge_in"])
+            if "echo_guard" in msg:
+                self.echo_guard = bool(msg["echo_guard"])
             if "smart_turn" in msg:
                 self.smart_turn = bool(msg["smart_turn"]) and ENGINE.get("turn") is not None
             if "end_ms" in msg:
@@ -659,6 +750,10 @@ class Session:
                 self.short_extra_ms = int(max(0, min(1000, msg["short_extra_ms"])))
             if "spec_ms" in msg:
                 self.spec_ms = int(max(0, min(1000, msg["spec_ms"])))
+            if "resume_ms" in msg:
+                self.resume_ms = int(max(0, min(3000, msg["resume_ms"])))
+            if "fast_end_ms" in msg:
+                self.fast_end_ms = int(max(100, min(1000, msg["fast_end_ms"])))
             if "threshold" in msg:
                 self.threshold = float(max(0.2, min(0.95, msg["threshold"])))
             if msg.get("mode") in ("vad", "ptt") and msg["mode"] != self.mode:
@@ -691,6 +786,8 @@ class Session:
 
             def do_reset():
                 with GPU_TURN:
+                    with self.undo_lock:
+                        self.pending_restore = None
                     th.reset(msg.get("system_prompt") or DEFAULT_SYSTEM_PROMPT)
             threading.Thread(target=do_reset, daemon=True).start()
             self.emit_json({"type": "reset_ok"})
