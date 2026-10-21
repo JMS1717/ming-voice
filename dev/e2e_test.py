@@ -30,7 +30,7 @@ class Mic:
     """Sends queued audio in real time, then near-silence, like a live microphone."""
 
     def __init__(self, ws):
-        self.ws, self.q, self.t_last_speech = ws, [], None
+        self.ws, self.q, self.t_last_speech, self.t_started = ws, [], None, None
         self.rng = np.random.default_rng(0)
 
     def say(self, audio):
@@ -46,6 +46,7 @@ class Mic:
         while True:
             if cur is None and self.q:
                 cur, idx = self.q.pop(0), 0
+                self.t_started = time.perf_counter()  # (when its first frame goes out)
             if cur is not None:
                 frame = cur[idx:idx + FRAME]
                 idx += FRAME
@@ -64,6 +65,7 @@ class Mic:
 async def main():
     results = []
     retracts = [0]
+    barge_ms = []
     async with websockets.connect(f"ws://{URL}/ws", max_size=2**24) as ws:
         hello = json.loads(await ws.recv())
         await ws.send(json.dumps({"type": "config", "voice": "US_Stella", "end_ms": 500, "spec_ms": int(os.environ.get("E2E_SPEC_MS", "32")),
@@ -117,6 +119,12 @@ async def main():
                     text += ev["delta"]
                 elif ev["type"] == "interrupt":
                     saw_interrupt = True
+                    if interrupt_with is not None and sent_interrupt and mic.t_started is not None:
+                        # from the first loud 32 ms frame of the interrupting speech to the server stopping the reply
+                        loud = np.flatnonzero([np.sqrt(np.mean(interrupt_with[i:i + FRAME] ** 2)) > 0.02
+                                               for i in range(0, len(interrupt_with), FRAME)])
+                        onset = mic.t_started + (loud[0] * FRAME / 16000 if len(loud) else 0.0)
+                        barge_ms.append(int((t - onset) * 1000))
                 elif ev["type"] == "retract":  # it answered during a pause and the user carried on: drop it
                     retracts[0] += 1
                     pcm, text, first_audio, multi = [], "", None, True
@@ -170,6 +178,7 @@ async def main():
     sl = [r["speech_end_ms"] for r in results if r["speech_end_ms"] is not None and r["name"] != "after_bargein"]
     print("end of speech -> first audio byte (ms):", sl, " median", int(np.median(sl)) if sl else None)
     print("withdrawn replies (resume after a pause):", retracts[0])
+    print("barge-in: start of interrupting speech -> reply stopped (ms):", barge_ms)
     checks = {
         "every turn produced audio": all(r["audio_s"] > 0.3 for r in results[:5]),
         "capital answer mentions Paris": "paris" in (results[0]["reply_text"] + results[0]["heard"]).lower(),
