@@ -8,6 +8,9 @@ samples/
 
 # per-machine state
 voices/
+certs/
+.lan_key
+.lan_info.json
 server.log
 *.log
 .fastlinear_tuning.json

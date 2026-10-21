@@ -38,6 +38,8 @@ import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
+import api
+import lan
 from engine import DEFAULT_SYSTEM_PROMPT, Fragmenter, GpuKeepAwake, Talker, Thinker, log
 
 VOICES = ["US_Stella", "US_Emma", "US_James", "UK_George", "UK_Charlotte", "灵小柔", "灵楷"]
@@ -141,12 +143,45 @@ async def lifespan(_app):
     yield
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, title="Ming Voice", version="1.1",
+              description="Local speech-to-speech assistant. The web app is at `/`; the OpenAI-compatible API is "
+                          "under `/v1`. From other devices (LAN port) send `Authorization: Bearer <access key>`.")
+api.setup(ENGINE, GPU_TURN, VOICES)
+app.include_router(api.router)
+app.add_middleware(lan.AccessControl)
 
 
-@app.get("/")
+@app.get("/", include_in_schema=False)
 def index():
     return FileResponse(HERE / "static" / "index.html")
+
+
+@app.get("/manifest.webmanifest", include_in_schema=False)
+def manifest():
+    return JSONResponse({"name": "Ming Voice", "short_name": "Ming Voice", "start_url": "/", "display": "standalone",
+                         "background_color": "#0f0f10", "theme_color": "#0f0f10",
+                         "icons": [{"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml"}]},
+                        media_type="application/manifest+json")
+
+
+@app.get("/icon.svg", include_in_schema=False)
+def icon():
+    from fastapi.responses import Response
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" '
+           'x2="1" y2="1"><stop offset="0" stop-color="#7aa2ff"/><stop offset="1" stop-color="#ff8a5c"/>'
+           '</linearGradient></defs><rect width="64" height="64" rx="14" fill="#0f0f10"/>'
+           '<circle cx="32" cy="32" r="18" fill="url(#g)"/></svg>')
+    return Response(svg, media_type="image/svg+xml")
+
+
+@app.get("/api/lan")
+def lan_status(request: Request):
+    """Phone links + QR code (only shown to the PC itself: the key must not leak to LAN clients)."""
+    if (request.scope.get("server") or (None, None))[1] == lan.LAN_PORT:
+        return {"local": False}
+    urls = lan.phone_urls()
+    return {"local": True, "running": bool(urls), "urls": urls,
+            "qr_svg": lan.qr_svg(urls[0]) if urls else None, "key": lan.access_key()}
 
 
 @app.get("/api/health")
@@ -725,6 +760,21 @@ if __name__ == "__main__":
     if os.environ.get("MING_TRACEMALLOC") == "1":
         import tracemalloc
         tracemalloc.start(8)
-    # Local-only by default (the API accepts audio uploads and drives the GPU); HOST=0.0.0.0 to share on the LAN.
-    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "8000")), log_level="warning",
-                ws_max_size=2**24, ws_ping_interval=None, ws_ping_timeout=None)
+    # Local-only by default (the API accepts audio uploads and drives the GPU). Other devices reach the app
+    # through windows/lan_proxy.py -> the key-protected LAN port (lan.py); HOST=0.0.0.0 exposes port 8000
+    # without a key unless MING_API_KEY is set.
+    import socket
+    socks = []
+    for host, port in ((os.environ.get("HOST", "127.0.0.1"), int(os.environ.get("PORT", "8000"))),
+                       ("127.0.0.1", lan.LAN_PORT)):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((host, port))
+        s.set_inheritable(True)
+        socks.append(s)
+    lan.access_key()  # create the key file on first start
+    config = uvicorn.Config(app, log_level="warning", ws_max_size=2**24, ws_ping_interval=None, ws_ping_timeout=None)
+    try:
+        uvicorn.Server(config).run(sockets=socks)
+    except KeyboardInterrupt:  # Ctrl-C: uvicorn.run() swallows this too
+        pass

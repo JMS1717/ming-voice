@@ -6,6 +6,8 @@
 #   MING_WSL_DIR     project directory inside that distribution   (default: the folder this script is in,
 #                    if it lives on \\wsl$ / \\wsl.localhost; otherwise ~/ming-voice)
 #   MING_PORT        server port                                  (default: 8000)
+#   -Phone           also start phone access (windows\lan_proxy.py: https on port 8443 of this PC)
+param([switch]$Phone)
 $distro = if ($env:MING_WSL_DISTRO) { $env:MING_WSL_DISTRO } else { 'Ubuntu' }
 $port = if ($env:MING_PORT) { $env:MING_PORT } else { '8000' }
 $dir = $env:MING_WSL_DIR
@@ -25,7 +27,21 @@ function Get-Health {
     try { return Invoke-RestMethod -Uri $health -TimeoutSec 2 } catch { return $null }
 }
 
+function Start-PhoneAccess {
+    $proxy = Join-Path $PSScriptRoot 'lan_proxy.py'
+    $info = Join-Path (Split-Path -Parent $PSScriptRoot) '.lan_info.json'
+    if (Test-Path $info) {  # already running? (it refreshes the file every 10 s)
+        try { $i = Get-Content $info -Raw | ConvertFrom-Json; if (([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $i.heartbeat) -lt 30) { return } } catch {}
+    }
+    $py = (Get-Command python -ErrorAction SilentlyContinue).Source
+    if (-not $py) { $py = (Get-Command py -ErrorAction SilentlyContinue).Source }
+    if (-not $py) { Write-Host 'Phone access needs Python for Windows (python.org).'; return }
+    Start-Process -FilePath $py -ArgumentList @("`"$proxy`"") -WindowStyle Minimized
+    Write-Host 'Phone access started (https, port 8443). Press Phone in the app for the QR code.'
+}
+
 $h = Get-Health
+if ($Phone) { Start-PhoneAccess }
 if ($h -and $h.ready) { Start-Process $url; exit 0 }
 
 if (-not $h) {

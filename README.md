@@ -14,6 +14,8 @@ typically starting to speak **~0.4 s after you stop talking**.
 * Multi-turn memory with KV-cache reuse, automatic rollover to a text history for long chats
 * 7 built-in voices plus **voice cloning** from a 5–15 s sample
 * Browser client: mic / speaker selection, live levels, transcript with replay & download, personas, settings
+* **Use it from your phone** over HTTPS on your home network (QR code, access key, installable web app)
+* **OpenAI-compatible API**: text-to-speech, transcription, chat with audio in and out
 * English and Chinese (the model's languages)
 
 Everything runs locally; no audio leaves the machine.
@@ -73,6 +75,52 @@ you're done: it holds ~20 GB of VRAM and keeps the GPU out of its deepest idle s
 * **Clone a voice** in the sidebar: record or upload 5–15 s of one person speaking. Voices are saved in
   `voices/`.
 
+### On your phone (or any device on your network)
+
+Start with `windows\Ming Voice (phone).cmd` (or run `python windows\lan_proxy.py` on Windows next to a running
+server), press **Phone** in the app on the PC, and scan the QR code. The phone opens
+`https://<pc-ip>:8443/?key=…`; the key is swapped for a cookie, so the link only has to be opened once.
+
+* Phones only allow the microphone on HTTPS, so the proxy uses a **self-signed certificate** (created on first
+  run in `certs/`): the phone warns once that the connection is not private. Tap *Advanced → Proceed*
+  (Safari: *Show Details → visit this website*).
+* Everything arriving from the network needs the access key (`.lan_key`, created on first start). Delete the
+  file and restart to change it.
+* Needs Python for Windows (`lan_proxy.py` uses only the standard library). WSL2 is not reachable from the
+  network by itself, which is why the proxy runs on the Windows side. If Windows Firewall asks, allow Python
+  on private networks.
+* Add the page to your home screen to use it like an app; the screen stays on during a conversation.
+* One device talks to the assistant at a time: opening it on the phone takes over from the PC tab.
+
+### API
+
+An OpenAI-compatible API runs on the same server; interactive docs at <http://localhost:8000/docs>.
+
+| Endpoint | |
+|---|---|
+| `POST /v1/audio/speech` | Text to speech: `{"input": "...", "voice": "US_Emma", "response_format": "wav"}` (wav, mp3, flac, pcm = s16le 24 kHz; wav/pcm stream as generated, first audio after ~0.12 s). OpenAI voice names (alloy, nova, …) map to built-in voices; cloned voices work by name. |
+| `POST /v1/audio/transcriptions` | Speech to text (multipart `file`), any length, English/Chinese. |
+| `POST /v1/chat/completions` | Chat with text and/or audio input (`input_audio` parts) and optional spoken output (`"modalities": ["text", "audio"]`); `stream: true` streams text (and pcm16 audio). Greedy decoding, no tools. |
+| `GET /v1/models` | `ming-3.0-audio-tiny` |
+
+```bash
+curl http://localhost:8000/v1/audio/speech -H "Content-Type: application/json" \
+  -d '{"input": "Hello from Ming Voice!", "voice": "US_Emma"}' -o hello.wav
+curl http://localhost:8000/v1/audio/transcriptions -F file=@hello.wav
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused-on-localhost")
+print(client.chat.completions.create(model="ming-3.0-audio-tiny",
+      messages=[{"role": "user", "content": "Tell me a fun fact about otters."}]).choices[0].message.content)
+```
+
+From another device use `https://<pc-ip>:8443/v1` with `api_key=<contents of .lan_key>` (and accept the
+self-signed certificate, e.g. `curl -k`, or pass `certs/lan.crt` as the CA). API requests share the GPU with
+the voice session, one at a time; chat requests run on an isolated copy of the conversation state, so they
+never disturb a live conversation. `dev/test_api.py` exercises every endpoint.
+
 | Setting | Default | Meaning |
 |---|---|---|
 | Smart turn detection | on | Ends the turn after 250 ms of silence when you've clearly finished, waits up to 1.5 s when you sound mid-sentence, and uses the end-of-turn pause otherwise. |
@@ -86,7 +134,9 @@ you're done: it holds ~20 GB of VRAM and keeps the GPU out of its deepest idle s
 
 | Variable | Default | |
 |---|---|---|
-| `HOST` / `PORT` | `127.0.0.1` / `8000` | Bind address. The server is local-only by default; `HOST=0.0.0.0` exposes it on your network (browsers only allow the microphone on `localhost` or HTTPS). |
+| `HOST` / `PORT` | `127.0.0.1` / `8000` | Bind address. The server is local-only by default; for other devices use the phone proxy (above). `HOST=0.0.0.0` exposes port 8000 directly, without HTTPS (no microphone in browsers) and without a key unless `MING_API_KEY` is set. |
+| `MING_LAN_PORT` | `8001` | Key-protected port for the phone proxy (localhost only; `lan_proxy.py --target`). |
+| `MING_API_KEY` | – | Require this key (`Authorization: Bearer …`) on every port, including localhost. |
 | `MING_MODEL_DIR` | `./model` | Model folder. |
 | `MING_MAX_CTX` | `8192` (`4096` in int8 mode) | Conversation context (tokens) before rolling over to a text history. |
 | `MING_INT8_EXPERTS` | `auto` | Weight-only int8 for the MoE experts (`1`/`0`/`auto` = int8 below 23 GB VRAM). Measured vs bf16: identical greedy replies and transcripts on the test set, logit cosine ≥ 0.997, +2% NLL. |
@@ -102,7 +152,9 @@ you're done: it holds ~20 GB of VRAM and keeps the GPU out of its deepest idle s
 ```
 browser (static/index.html) ⇄ WebSocket: 16 kHz PCM in / 44.1 kHz PCM out ⇄ server.py
   server.py   Silero VAD · Smart Turn (turn_detect.py) · speculative turn-taking with rollback · barge-in
-              · push-to-talk · voice cloning / TTS / ASR HTTP endpoints · background transcription
+              · push-to-talk · voice cloning · background transcription
+  api.py      OpenAI-compatible /v1 API (speech, transcriptions, chat with audio in/out)
+  lan.py      access key + cookie login for the LAN port; windows/lan_proxy.py terminates HTTPS on Windows
   engine.py   Thinker: Ming audio LLM (hybrid Kimi-delta-attention / MLA, 128-expert MoE)
                 - static-state cache, one HIP graph per attention-length bucket (14 ms/token)
                 - fused Triton MoE with the shared expert folded in (fused_moe.py): a GEMV kernel pair
@@ -144,6 +196,9 @@ turn, now ~15 ms), graph-capturing every per-token step, and hiding model latenc
 * `dev/test_moe_prefill.py` (`TUNE=1` to re-tune), `dev/test_prefill.py`, `dev/test_prefill_layer.py` — fused
   prefill MoE: accuracy vs. fp32, replies, time to first token
 * `dev/test_turn.py` — Smart Turn scores on complete vs. truncated questions
+* `dev/test_api.py` — every `/v1` endpoint, plus a live WebSocket conversation that must survive the API calls
+  (`BASE=https://<pc-ip>:8443 KEY=… python dev/test_api.py` from another machine)
+* `dev/test_encoder.sh`, `dev/profile_prefill.py` — audio encoder (trimmed chunks, flash attention) and prefill timing
 * `dev/tts_check.py`, `dev/test_clone.py`, `dev/test_takeover.py` — API checks
 
 ## Credits & licenses

@@ -2,8 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Ming Voice</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
 <style>
   :root {
     --bg: #f4f4f1; --panel: #ffffff; --panel-2: #fafaf8; --text: #1b1b19; --muted: #6d6d67; --faint: #9b9b94;
@@ -25,8 +32,8 @@
   button, select, input, textarea { font: inherit; color: inherit; }
   .app { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
   header { display: flex; align-items: center; gap: 12px; padding: 10px 18px; border-bottom: 1px solid var(--line); background: var(--panel); }
-  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 16px; }
-  .brand .logo { width: 26px; height: 26px; border-radius: 8px; background: linear-gradient(135deg, var(--accent), var(--speak)); }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 16px; white-space: nowrap; }
+  .brand .logo { width: 26px; height: 26px; flex-shrink: 0; border-radius: 8px; background: linear-gradient(135deg, var(--accent), var(--speak)); }
   .brand small { color: var(--muted); font-weight: 400; font-size: 12.5px; }
   .spacer { flex: 1; }
   .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-2); white-space: nowrap; }
@@ -34,6 +41,7 @@
   .pill.ok .d { background: var(--listen); } .pill.bad .d { background: var(--danger); }
   .btn { border: 1px solid var(--line); background: var(--panel); padding: 7px 12px; border-radius: 9px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
   .btn:hover { background: var(--panel-2); }
+  a.btn { text-decoration: none; color: inherit; }
   .btn:disabled { opacity: .45; cursor: default; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
   .btn.primary:hover { filter: brightness(1.05); }
@@ -97,28 +105,72 @@
   .banner { display: flex; gap: 12px; align-items: center; justify-content: center; padding: 10px 16px;
     background: var(--accent-soft); border-bottom: 1px solid var(--line); font-size: 14px; }
   .banner[hidden] { display: none; }
-  .app { grid-template-rows: auto auto 1fr; }
+  .app { grid-template-rows: auto auto 1fr; height: 100dvh; }
+  dialog { border: 1px solid var(--line); border-radius: 16px; background: var(--panel); color: var(--text); padding: 20px 22px;
+    max-width: min(420px, calc(100vw - 32px)); box-shadow: 0 20px 60px rgba(0,0,0,.35); }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  dialog h2 { margin: 0 0 6px; font-size: 17px; }
+  dialog p, dialog li { color: var(--muted); font-size: 13px; line-height: 1.55; }
+  dialog ol { padding-left: 18px; margin: 8px 0; }
+  .qr { display: flex; justify-content: center; margin: 12px 0; }
+  .qr svg { width: 220px; height: 220px; border-radius: 10px; }
+  .urlbox { font: 12px ui-monospace, monospace; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 7px 9px; word-break: break-all; user-select: all; }
+  .dlg-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; flex-wrap: wrap; }
+  #phoneBtn { display: none; }
+  .is-local #phoneBtn { display: inline-flex; }
   @media (max-width: 900px) {
     .main { grid-template-columns: 1fr; }
     aside { display: none; border-left: none; border-top: 1px solid var(--line); }
-    .main.show-settings aside { display: block; position: fixed; inset: 52px 0 0 0; z-index: 5; }
+    .main.show-settings aside { display: block; position: fixed; inset: 52px 0 0 0; z-index: 5; padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
     #settingsToggle { display: inline-flex; }
     header .pill.hide-sm { display: none; }
     #orb { width: 150px; height: 150px; }
+  }
+  @media (max-width: 400px) {
+    .brand .name { display: none; }
+  }
+  @media (max-width: 560px) {
+    header { gap: 8px; padding: 8px 12px; padding-top: calc(8px + env(safe-area-inset-top)); }
+    .brand small, #export, .kbd-hint { display: none; }
+    .brand { font-size: 15px; gap: 8px; }
+    header .btn { padding: 6px 10px; }
+    #conn { padding: 4px 8px; }
+    #conn > span:last-child { display: none; }
+    .main.show-settings aside { inset: 48px 0 0 0; }
+    .hero { padding-top: 10px; gap: 8px; }
+    #orb { width: 120px; height: 120px; }
+    .controls { gap: 6px; }
+    .controls .btn { padding: 10px 11px; }
+    .log-wrap { padding: 6px 12px 10px; }
+    .msg { max-width: 92%; }
+    .composer { padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
+    .composer input { font-size: 16px; }  /* iOS zooms into inputs below 16 px */
   }
 </style>
 </head>
 <body>
 <div class="app">
   <header>
-    <div class="brand"><div class="logo"></div>Ming Voice <small>Ming-3.0-audio-tiny · local</small></div>
+    <div class="brand"><div class="logo"></div><span class="name">Ming Voice</span> <small>Ming-3.0-audio-tiny · local</small></div>
     <span class="spacer"></span>
     <span id="conn" class="pill"><span class="d"></span><span>connecting…</span></span>
     <span id="health" class="pill hide-sm" title="Conversation context and GPU memory">–</span>
+    <button class="btn" id="phoneBtn" title="Use Ming Voice from your phone">Phone</button>
     <button class="btn" id="newChat" title="Forget the conversation (N)">New chat</button>
     <button class="btn" id="export" title="Download the transcript">Export</button>
     <button class="btn" id="settingsToggle">Settings</button>
   </header>
+
+  <dialog id="phoneDlg">
+    <h2>Use it on your phone</h2>
+    <div id="phoneBody"></div>
+    <div class="dlg-actions">
+      <a class="btn" href="/docs" target="_blank" rel="noopener">API docs</a>
+      <button class="btn" id="phoneCopy">Copy link</button>
+      <button class="btn primary" id="phoneClose">Done</button>
+    </div>
+  </dialog>
 
   <div class="banner" id="takeover" hidden>This conversation was opened in another tab or window.
     <button class="btn primary" id="useHere">Use it here</button></div>
@@ -127,7 +179,7 @@
       <div class="hero">
         <canvas id="orb" width="380" height="380" aria-hidden="true"></canvas>
         <div class="state-label" id="stateLabel">Not started</div>
-        <div class="state-sub" id="stateSub">Pick your microphone and speakers on the right, then press Start.</div>
+        <div class="state-sub" id="stateSub">Pick your microphone and speakers in Settings, then press Start.</div>
         <div class="controls">
           <button class="btn primary" id="start">Start conversation</button>
           <button class="btn" id="mute" disabled title="Mute microphone (M)">Mute mic</button>
@@ -145,7 +197,7 @@
         <div id="log">
           <div class="empty">Talk naturally; pause briefly when you're done and the assistant answers out loud.<br>
             Interrupt it any time by talking over it. Headphones give the best results.<br>
-            <kbd>Space</kbd> hold to talk (push-to-talk mode) · <kbd>M</kbd> mute · <kbd>Esc</kbd> stop reply · <kbd>N</kbd> new chat</div>
+            <span class="kbd-hint"><kbd>Space</kbd> hold to talk (push-to-talk mode) · <kbd>M</kbd> mute · <kbd>Esc</kbd> stop reply · <kbd>N</kbd> new chat</span></div>
         </div>
       </div>
       <div class="composer">
@@ -246,7 +298,7 @@ const userMsgs = new Map();  // reply id -> {el, entry} for filling in transcrip
 function toast(t) { const e = $('toast'); e.textContent = t; e.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => e.classList.remove('show'), 2200); }
 
 const STATES = {
-  off: ['Not started', 'Pick your microphone and speakers on the right, then press Start.'],
+  off: ['Not started', 'Pick your microphone and speakers in Settings, then press Start.'],
   idle: ['Paused', 'Microphone is off.'],
   listening: ['Listening', 'Go ahead, I’m listening.'],
   ptt: ['Ready', 'Hold Space or the button while you talk.'],
@@ -562,8 +614,9 @@ function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => { setConn(true, 'connected'); $('start').disabled = false; };
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     if (takenOver) { setConn(false, 'open in another tab'); return; }
+    if (ev.code === 4401) { setConn(false, 'access key needed'); toast('Open the link from the QR code on the PC (Phone button)'); return; }
     setConn(false, 'reconnecting…'); setTimeout(connect, 1500);
   };
   ws.onmessage = (ev) => {
@@ -637,12 +690,12 @@ function finishBot(interrupted) {
 // ---------------------------------------------------------------- controls
 $('start').onclick = async () => {
   if (running) {
-    running = false; stopMic(); stopPlayback();
+    running = false; stopMic(); stopPlayback(); holdWake(false);
     $('start').textContent = 'Start conversation'; $('start').classList.add('primary'); $('mute').disabled = true; restState(); return;
   }
   try {
     await startMic();
-    running = true; muted = false;
+    running = true; muted = false; holdWake(true);
     $('start').textContent = 'End conversation'; $('start').classList.remove('primary');
     $('mute').disabled = false; $('mute').textContent = 'Mute mic'; $('mute').classList.remove('on');
     restState();
@@ -682,7 +735,11 @@ $('export').onclick = () => {
   l.download = `ming-voice-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.md`; l.click();
 };
 $('useHere').onclick = () => { takenOver = false; $('takeover').hidden = true; connect(); };
-$('settingsToggle').onclick = () => $('main').classList.toggle('show-settings');
+$('settingsToggle').onclick = () => {
+  const open = $('main').classList.toggle('show-settings');
+  $('settingsToggle').textContent = open ? 'Done' : 'Settings';
+  $('settingsToggle').classList.toggle('primary', open);
+};
 $('tform').onsubmit = async (e) => {
   e.preventDefault(); const t = $('tin').value.trim(); if (!t || !ws || ws.readyState !== 1) return;
   await ensureCtx(); stopPlayback();
@@ -739,11 +796,62 @@ draw();
 // ---------------------------------------------------------------- health
 async function pollHealth() {
   try {
-    const h = await (await fetch('/api/health')).json();
+    const r = await fetch('/api/health');
+    if (r.status === 401) { $('health').textContent = 'access key needed'; return; }
+    const h = await r.json();
     $('health').textContent = h.ready ? `context ${h.ctx_tokens} tok · GPU ${h.gpu_mem_gib} GiB` : 'model loading…';
   } catch { $('health').textContent = 'server offline'; }
 }
 setInterval(pollHealth, 4000); pollHealth();
+
+// ---------------------------------------------------------------- phone access (shown on the PC itself)
+let phoneUrl = null;
+async function loadLan() {
+  try {
+    const j = await (await fetch('/api/lan')).json();
+    document.body.classList.toggle('is-local', !!j.local);
+    return j;
+  } catch { return null; }
+}
+$('phoneBtn').onclick = async () => {
+  const j = await loadLan();
+  const body = $('phoneBody');
+  if (!j || !j.local) return;
+  if (j.running) {
+    phoneUrl = j.urls[0];
+    body.innerHTML = `<p>Scan with your phone's camera (same Wi-Fi network as this PC):</p><div class="qr">${j.qr_svg}</div>
+      <div class="urlbox"></div>
+      <ol><li>Your phone will warn that the connection is not private (the certificate is self-signed): tap
+      <b>Advanced → Proceed</b> (Safari: <b>Show Details → visit this website</b>).</li>
+      <li>Allow the microphone, then press <b>Start conversation</b>. Add it to your home screen to use it like an app.</li>
+      <li>Only one device talks to the assistant at a time; opening it on the phone takes over from this tab.</li></ol>`;
+    body.querySelector('.urlbox').textContent = phoneUrl;
+    $('phoneCopy').hidden = false;
+  } else {
+    phoneUrl = null;
+    body.innerHTML = `<p>Phone access is off. Start it on this PC with <b>windows\\Ming Voice (phone).cmd</b>, or run:</p>
+      <div class="urlbox">python windows\\lan_proxy.py</div>
+      <p>Then press <b>Phone</b> again for the QR code. API clients on your network use the same address with
+      <code>Authorization: Bearer ${j.key}</code>.</p>`;
+    $('phoneCopy').hidden = true;
+  }
+  $('phoneDlg').showModal();
+};
+$('phoneClose').onclick = () => $('phoneDlg').close();
+$('phoneCopy').onclick = async () => {
+  try { await navigator.clipboard.writeText(phoneUrl); toast('Link copied'); } catch { toast('Copy failed: select the link and copy it'); }
+};
+loadLan();
+
+// keep a phone's screen on while a conversation is running (the mic stops when the screen locks)
+let wakeLock = null;
+async function holdWake(on) {
+  try {
+    if (on && 'wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.onrelease = () => (wakeLock = null); }
+    else if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch {}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && running) holdWake(true); });
 
 setMode(mode);
 setState('off');

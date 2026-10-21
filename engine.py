@@ -13,6 +13,7 @@ import re
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 os.environ.setdefault("HSA_ENABLE_DXG_DETECTION", "1")
@@ -20,6 +21,9 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 # Encode >30 s inputs one 30 s Whisper chunk at a time (lower peak VRAM; same result).
 os.environ.setdefault("HF_SFT_WHISPER_MICRO_BATCH", "1")
+# Flash attention for SDPA on RDNA3 (AOTriton). Without it PyTorch falls back to the math path, which
+# materializes fp32 attention matrices: the Whisper encoder over a 30 s chunk is ~2x slower.
+os.environ.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
 
 import numpy as np
 import torch
@@ -145,6 +149,29 @@ def _prestack_experts(model_dir):
 
     block._setup_experts = _setup_experts
     block._prestacked = True
+
+
+def _get_audio_features_trimmed(self, audio_feats, audio_feats_lengths):
+    """The model's _get_audio_features, but each 30 s Whisper chunk is encoded at its own length: the
+    reference pads every chunk of a batch to the longest, so a 35 s turn paid for 60 s of encoder."""
+    chunk_size = getattr(self.config.audio_config, "whisper_chunk_size", 3000)
+    lengths = [int(n) for n in audio_feats_lengths[0].tolist() if int(n) > 0]
+    chunks = []
+    for seg in audio_feats[0, :sum(lengths)].split(lengths):
+        chunks.extend(seg.split(chunk_size))
+    out = []
+    for c in chunks:
+        n = torch.tensor([c.shape[0]], dtype=torch.long, device=audio_feats.device)
+        encoded, enc_len = self.model.audio(c[None], n)[:2]
+        projected = self.linear_proj_audio(encoded.transpose(-1, -2))
+        for module in self.linear_proj_audio:
+            if isinstance(module, torch.nn.Conv1d):
+                enc_len = (enc_len + 2 * module.padding[0] - module.kernel_size[0]) // module.stride[0] + 1
+        out.append(projected[0, :int(enc_len[0])])
+    audio_embeds = torch.cat(out, dim=0).unsqueeze(0)
+    if self.config.norm_query_embeds:
+        audio_embeds = F.normalize(audio_embeds, dim=2)
+    return audio_embeds
 
 
 _FUSED_PREFILL = os.environ.get("MING_FUSED_PREFILL", "1") == "1"
@@ -434,6 +461,8 @@ class Thinker:
             if info["unexpected"]:
                 log(f"thinker load: {info['unexpected']} unused checkpoint tensors, e.g. {info['unexpected_examples']}")
         t_w = time.time()
+        from types import MethodType
+        self.model._get_audio_features = MethodType(_get_audio_features_trimmed, self.model)
         n = _patch_moe(self.model)
         if getattr(self, "int8_experts", None) is None:
             self.int8_experts = _want_int8_experts()
@@ -552,6 +581,28 @@ class Thinker:
                for st in self._layers]
         return dict(cur_len=self.cur_len, pending=self.pending, n_hist=len(self.history), kda=kda)
 
+    @contextmanager
+    def isolated(self):
+        """Run a stateless request (API chat) on the fast cached path without disturbing the live
+        conversation: saves the whole state (recurrent states + the filled MLA KV prefix), restores it after.
+        The caller must hold the GPU lock."""
+        n = self.cur_len
+        saved = [(st.keys.clone(), tuple(c.clone() for c in st.values)) if isinstance(st, _KDAState)
+                 else (st.k[:, :, :n].clone(), st.v[:, :, :n].clone()) for st in self._layers]
+        meta = (self.cur_len, self.pending, list(self.history), self.system_prompt)
+        try:
+            yield self
+        finally:
+            for st, (a, b) in zip(self._layers, saved):
+                if isinstance(st, _KDAState):
+                    st.keys.copy_(a)
+                    for dst, src in zip(st.values, b):
+                        dst.copy_(src)
+                else:
+                    st.k[:, :, :n].copy_(a)
+                    st.v[:, :, :n].copy_(b)
+            self.cur_len, self.pending, self.history, self.system_prompt = meta
+
     def restore(self, snap):
         for st, saved in zip(self._layers, snap["kda"]):
             if saved is not None:
@@ -652,12 +703,19 @@ class Thinker:
         self.cur_len += 1
         return int(self.tok_buf.item())
 
+    def render_history(self, turns: list[tuple[str, str]]) -> str:
+        """Earlier (user, assistant) text exchanges in the chat format, e.g. from an API request."""
+        return "".join(f"<role>HUMAN</role>{u}{ROLE_END}<role>ASSISTANT</role>\n<think></think>{a}{ROLE_END}"
+                       for u, a in turns)
+
     @torch.inference_mode()
     def stream(self, wav16k: np.ndarray, cancel: threading.Event | None = None, max_new_tokens: int = 400,
-               user_text: str | None = None):
-        """Yield text deltas of the assistant reply to one user utterance (16 kHz mono float32)."""
+               user_text: str | None = None, history_text: str = ""):
+        """Yield text deltas of the assistant reply to one user utterance (16 kHz mono float32) and/or text.
+        history_text: earlier turns (render_history) inserted after the system prompt on a fresh context."""
         cancel = cancel or threading.Event()
         feats = {}
+        human = ""
         if wav16k is not None:
             wav16k = pad_to_bucket(wav16k)
             mel = self._mel(torch.from_numpy(np.ascontiguousarray(wav16k, dtype=np.float32)).to(DEVICE),
@@ -667,8 +725,7 @@ class Thinker:
             human = "<|audio_start|>" + "<|audio_pad|>" * n_audio + "<|audio_end|>"
             feats = dict(audio_feats=mel.to(DTYPE),
                          audio_feats_lengths=torch.tensor([[mel.shape[1]]], dtype=torch.long))
-        else:
-            human = user_text or ""
+        human += user_text or ""
         tail = f"<role>HUMAN</role>{human}{ROLE_END}<role>ASSISTANT</role>\n<think></think>"
         n_tail = len(self.tok(tail, add_special_tokens=False).input_ids)
         rollover = ""
@@ -679,7 +736,7 @@ class Thinker:
             self.reset()
             self.history = hist
         first = self.cur_len == 0
-        prefix = (self._system_block() + rollover) if first else (self.pending or "")
+        prefix = (self._system_block() + (rollover or history_text)) if first else (self.pending or "")
         ids = self.tok(prefix + tail, return_tensors="pt", add_special_tokens=first).input_ids.to(DEVICE)
         max_new_tokens = min(max_new_tokens, self.max_ctx - self.cur_len - ids.shape[1] - 1)
         tok = self._prefill(ids, feats)
