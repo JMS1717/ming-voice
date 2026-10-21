@@ -1323,6 +1323,9 @@ class Talker:
         self.g_tail = self.g_step = None
         if use_graphs:
             self._capture()
+        self.anchors = {}
+        if os.environ.get("MING_VOICE_ANCHORS", "1") == "1":
+            self.load_anchors()
         log(f"Talker loaded in {time.time() - t:.1f}s (read {t_read - t:.1f}s, build {t_build - t_read:.1f}s, "
             f"fast path {t_fast - t_build:.1f}s, graphs {time.time() - t_fast:.1f}s), "
             f"{torch.cuda.memory_allocated() / 2**30:.2f} GiB")
@@ -1393,6 +1396,28 @@ class Talker:
             with torch.autocast(device_type="cuda", dtype=DTYPE):
                 self._full_step()
 
+    # ---- voice anchors ----
+    # A built-in voice is only named in the instruction, so each fragment is a fresh draw of that voice: now and
+    # then one comes out as a different speaker mid-reply. An anchor is a short clip of the voice (its text and
+    # latents); every fragment continues from it, which holds the speaker and the clip's pace steady.
+    ANCHOR_DIR = Path(__file__).resolve().parent / "anchors"
+
+    def load_anchors(self):
+        for f in sorted(self.ANCHOR_DIR.glob("*.pt")):
+            a = torch.load(f, map_location="cpu")
+            self.anchors[f.stem] = self.make_anchor(a["text"], a["latents"])
+        if self.anchors:
+            log(f"voice anchors: {', '.join(self.anchors)}")
+
+    @torch.inference_mode()
+    def make_anchor(self, text: str, latents: torch.Tensor) -> dict:
+        D, H = self.t.latent_dim, self.t.model.config.hidden_size
+        lat = latents.to(DEVICE, DTYPE).reshape(1, -1, D)
+        with torch.cuda.stream(self.stream), torch.autocast(device_type="cuda", dtype=DTYPE):
+            emb = self.t.aggregator(lat.reshape(-1, 1, D)).reshape(1, -1, H)
+        self.stream.synchronize()
+        return {"text": text, "latents": lat, "emb": emb}
+
     # ---- text front-end ----
     @torch.inference_mode()
     def speaker_from_audio(self, samples: np.ndarray, sample_rate: int):
@@ -1428,32 +1453,49 @@ class Talker:
     # ---- streaming synthesis ----
     @torch.inference_mode()
     def synth_stream(self, text: str, voice: str = "US_Stella", cancel: threading.Event | None = None,
-                     chunk_latents: int = 3, max_steps: int = 750):
-        """Yield float32 numpy PCM chunks (44.1 kHz) as soon as they are decoded."""
+                     chunk_latents: int = 3, max_steps: int = 750, anchor: dict | None = None,
+                     collect: list | None = None):
+        """Yield float32 numpy PCM chunks (44.1 kHz) as soon as they are decoded.
+        anchor: override the voice's anchor (False: none); collect: gets each fragment's latents."""
         cancel = cancel or threading.Event()
         with self.lock:
             speaker = [voice] if isinstance(voice, torch.Tensor) else None
+            if anchor is None:
+                anchor = self.anchors.get(voice) if isinstance(voice, str) else None
             for fragment, prompt, instruction in self.prepare(text, voice):
                 if cancel.is_set():
                     return
+                a = anchor if anchor and not self._is_chinese(fragment) else None  # (anchors are English clips)
+                lat = [] if collect is not None else None
                 yield from self._synth_fragment(fragment, prompt, instruction, cancel, chunk_latents, max_steps,
-                                                speaker)
+                                                speaker, a, lat)
+                if lat is not None:
+                    collect.append((fragment, torch.cat(lat, 1)))
 
-    def _synth_fragment(self, fragment, prompt, instruction, cancel, chunk_latents, max_steps, speaker=None):
+    def _synth_fragment(self, fragment, prompt, instruction, cancel, chunk_latents, max_steps, speaker=None,
+                        anchor=None, collect=None):
         # No `with` block may span a `yield`: autocast/stream state is thread-local and would leak.
         vae = self.t.audio_vae
         s = self.stream
         with torch.cuda.stream(s), torch.autocast(device_type="cuda", dtype=DTYPE):
-            emb = self.t.input_embeddings(fragment, prompt, instruction, speaker, None, None)
+            emb = self.t.input_embeddings(fragment, prompt, instruction, speaker,
+                                          anchor["text"] if anchor else None, anchor["emb"] if anchor else None)
             T = emb.shape[1]
             max_steps = min(max_steps, self.max_len - T - 1)
             hid = self.llm.forward(emb, torch.arange(T, device=DEVICE))
             self.hidden_buf.copy_(hid[:, -1:])
-            self.hist_buf.zero_()
+            if anchor:
+                self.hist_buf.copy_(anchor["latents"][:, -1:])
+            else:
+                self.hist_buf.zero_()
             self.pos_buf.fill_(T)
             self._run_tail()
             pending = [self.latent_buf.clone()]
+            if collect is not None:
+                collect.append(pending[0])
         state, pkv, calls, step = (None, None, None), None, 0, 0
+        # (an anchor ending in silence made the talker stop after a few latents: don't let it end implausibly early)
+        min_steps = max(3, int(0.25 * len(fragment))) if anchor else 3
 
         def decode(last):
             nonlocal state, pkv, calls, pending
@@ -1467,7 +1509,7 @@ class Talker:
             out = None
             with torch.cuda.stream(s):
                 stop = float(self.stop_buf.item())  # sync: latent `step` and its stop prob are ready
-                done = (step > 3 and stop > 0.5) or step + 1 >= max_steps or cancel.is_set()
+                done = (step > min_steps and stop > 0.5) or step + 1 >= max_steps or cancel.is_set()
                 if done:
                     if not cancel.is_set():
                         out = decode(True)
@@ -1476,6 +1518,8 @@ class Talker:
                         out = decode(False)
                     self._run_step()
                     pending.append(self.latent_buf.clone())
+                    if collect is not None:
+                        collect.append(pending[-1])
                     step += 1
             if out is not None and out.size:
                 yield out
@@ -1530,6 +1574,10 @@ _SPEECH_SUBS = [(re.compile(p, re.I), r) for p, r in (
     (r"(?<=[a-z])-(?=[a-z])", " "),  # Wi-Fi (sometimes said as "why")
 )]
 _MONEY = re.compile(r"([$€£])(\d+(?:,\d{3})*)(?:\.(\d+))?(?:\s*(thousand|million|billion|trillion)\b)?", re.I)
+# It also says "20 to 22" as "twenty to twenty, two" about half the time; spelled out it reads them right.
+_COMPOUND = re.compile(r"(?<![\d.,:/])\b([2-9])([1-9])\b(?![.,:/]\d)")
+_TENS = "twenty thirty forty fifty sixty seventy eighty ninety".split()
+_ONES = "one two three four five six seven eight nine".split()
 
 
 def clean_for_speech(s: str) -> str:
@@ -1540,6 +1588,7 @@ def clean_for_speech(s: str) -> str:
     s = _MONEY.sub(_money, s)
     for p, r in _SPEECH_SUBS:
         s = p.sub(r, s)
+    s = _COMPOUND.sub(lambda m: f"{_TENS[int(m[1]) - 2]}-{_ONES[int(m[2]) - 1]}", s)
     return re.sub(r"\s+", " ", s).strip()
 
 
