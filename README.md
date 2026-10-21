@@ -3,7 +3,7 @@
 Low-latency, fully local **speech-to-speech** voice assistant built on
 [inclusionAI/Ming-3.0-audio-tiny](https://huggingface.co/inclusionAI/Ming-3.0-audio-tiny), running on an
 **AMD Radeon GPU** (ROCm 7.2 inside WSL2 on Windows). Talk to it in the browser; it answers out loud,
-typically starting to speak **~0.3 s after you stop talking**.
+typically starting to speak **~0.25 s after you stop talking**.
 
 * Hands-free conversation with voice activity detection, or push-to-talk
 * **Smart turn detection** ([Smart Turn v3](https://huggingface.co/pipecat-ai/smart-turn-v3)): judges from your
@@ -27,7 +27,7 @@ Everything runs locally; no audio leaves the machine.
 
 | | |
 |---|---|
-| From the end of your speech to the first audio | ~0.25 s median, measured from the last audible sound of the question (the pause is timed from the drop in voice energy, ~0.25 s when Smart Turn is confident; the reply is generated during it and is ready when the pause ends) |
+| From the end of your speech to the first audio | ~0.23 s median, measured from the last audible sound of the question (the pause is timed from the drop in voice energy, 0.2 s when Smart Turn is confident; the reply is generated during it and is ready when the pause ends) |
 | Thinker (audio LLM, 9.3B MoE / 2.7B active) | ~115 tokens/s decode; first token ~80 ms after a short spoken turn (~65 ms typed) |
 | Talker (speech synthesis) | ~0.3× real time end to end; 13 ms per 80 ms of audio for the core step |
 | Startup | ~30 s (first start after install: ~1–2 min to compile kernels) |
@@ -126,7 +126,7 @@ never disturb a live conversation. `dev/test_api.py` exercises every endpoint.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| Smart turn detection | on | Ends the turn after 250 ms of silence when you've clearly finished, waits up to 1.5 s when you sound mid-sentence, and uses the end-of-turn pause otherwise. |
+| Smart turn detection | on | Ends the turn after a 200 ms pause when you've clearly finished, waits up to 1.5 s when you sound mid-sentence, and uses the end-of-turn pause otherwise. |
 | End-of-turn pause | 500 ms | Silence that ends your turn (when Smart Turn is off or unsure). Lower = snappier, but more likely to cut you off. |
 | Extra pause after short phrases | 250 ms | Added when you've said < 1 s ("Can you tell me…"), which is usually unfinished. |
 | Start thinking after | 32 ms | When speculative generation starts (it is discarded if you keep talking). |
@@ -147,6 +147,7 @@ never disturb a live conversation. `dev/test_api.py` exercises every endpoint.
 | `MING_CFM_STEPS` | `10` | Talker flow-matching steps (fewer is faster but degrades speech). |
 | `MING_SMART_TURN` | `1` | Smart Turn end-of-turn detection (needs `model_extra/smart-turn-v3.2-cpu.onnx`, downloaded by `setup_env.sh`). |
 | `MING_FUSED_PREFILL` | `1` | Grouped Triton MoE kernels for prompt prefill (`0` = the reference per-expert loop). |
+| `MING_PREFILL_GRAPHS` | `1` | Graph-captured prompt prefill for prompts up to 128 tokens, padded to 32/64/128 (`0` = eager). |
 | `MING_FUSED_OPS` | `1` | Triton RMSNorm and one-token MoE router (`0` = the reference PyTorch ops). |
 | `MING_ECHO_DEBUG` | unset | Log what the echo guard measured (correlation, delay, levels) whenever a barge-in fires. |
 | `MING_FAST_TALKER` / `MING_GRAPHS` | `1` / `1` | Fused Triton Talker path / HIP graphs (set `0` to fall back to the reference code). |
@@ -164,6 +165,8 @@ browser (static/index.html) ⇄ WebSocket: 16 kHz PCM in / 44.1 kHz PCM out ⇄ 
   lan.py      access key + cookie login for the LAN port; windows/lan_proxy.py terminates HTTPS on Windows
   engine.py   Thinker: Ming audio LLM (hybrid Kimi-delta-attention / MLA, 128-expert MoE)
                 - static-state cache, one HIP graph per attention-length bucket (8.7 ms/token)
+                - prefill graphs too: prompts padded to 32/64/128 tokens, padding made a no-op for the
+                  recurrent KDA layers (zero write strength, unit decay, conv state rebuilt from real tokens)
                 - fused Triton MoE with the shared expert folded in (fused_moe.py): a GEMV kernel pair
                   for decode, grouped tl.dot kernels for prefill (tokens sorted by expert on the GPU)
                 - multi-turn KV reuse, snapshot/restore for speculation, text-history rollover
@@ -202,6 +205,7 @@ turn, now ~15 ms), graph-capturing every per-token step, and hiding model latenc
 * `dev/test_fast_tail.py`, `dev/test_fast_llm.py`, `dev/test_sensitivity.py` — fused paths vs. reference
 * `dev/test_moe_prefill.py` (`TUNE=1` to re-tune), `dev/test_prefill.py`, `dev/test_prefill_layer.py` — fused
   prefill MoE: accuracy vs. fp32, replies, time to first token
+* `dev/test_prefill_graphs.py` — graph-captured padded prefill vs. eager: same tokens, states within bf16 noise
 * `dev/test_turn.py` — Smart Turn scores on complete vs. truncated questions
 * `dev/test_resume.py` — pause mid-question until the reply starts, then continue: one answer to the whole
   question, nothing left of the withdrawn reply; late interruptions still interrupt

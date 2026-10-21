@@ -383,7 +383,7 @@ class Session:
         # Smart Turn: once the pause starts, a classifier judges from the audio whether the user has finished.
         # Confident "finished" ends the turn after fast_end_ms; "unfinished" stretches the wait to slow_end_ms.
         self.smart_turn = ENGINE.get("turn") is not None
-        self.fast_end_ms = 250
+        self.fast_end_ms = 200
         self.slow_end_ms = 1500
         self.turn_fut = None
         self.turn_p = None
@@ -392,6 +392,7 @@ class Session:
         self.echo_lock = threading.Lock()
         self.echo_guard = True
         self.echo_trace = []
+        self.echo_suppressed = 0
         self.threshold = 0.5
         self.barge_threshold = 0.75
         self.barge_ms = 250
@@ -450,6 +451,9 @@ class Session:
             e = self.echo.is_echo(now)
             if ECHO_DEBUG:
                 g = self.echo
+                if g.learned:
+                    log(f"echo level learned: erl={g.erl:.3f} from {g.learned}")
+                    g.learned = []
                 self.echo_trace.append((round(g.rho, 2), g.lag, round(g.mic_rms, 4), round(g.ref_rms, 4),
                                         None if g.erl is None else round(g.erl, 3), e))
                 self.echo_trace = self.echo_trace[-24:]
@@ -512,9 +516,15 @@ class Session:
             self.preroll.append(f)
             self.preroll = self.preroll[-20:]  # 640 ms: confident-speech detection lags the onset
             if p < self.barge_threshold:
-                self.speaking_frames = 0
+                if ECHO_DEBUG and self.speaking_frames >= 3:
+                    log(f"barge-in attempt dropped after {self.speaking_frames} frames; trace: {self.echo_trace[-12:]}")
+                self.speaking_frames = self.echo_suppressed = 0
             elif echo:  # the assistant's own voice: does not count (and slowly cancels earlier counts)
                 self.speaking_frames = max(0, self.speaking_frames - 1)
+                if ECHO_DEBUG:
+                    self.echo_suppressed += 1
+                    if self.echo_suppressed == 6:
+                        log(f"speech ignored as echo; trace (rho, lag, mic, ref, erl, echo, p, n): {self.echo_trace}")
             else:
                 self.speaking_frames += 1
             if ECHO_DEBUG:

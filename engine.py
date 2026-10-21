@@ -176,6 +176,8 @@ def _get_audio_features_trimmed(self, audio_feats, audio_feats_lengths):
 
 _FUSED_PREFILL = os.environ.get("MING_FUSED_PREFILL", "1") == "1"
 _FUSED_OPS = os.environ.get("MING_FUSED_OPS", "1") == "1"  # Triton RMSNorm + one-token MoE router
+_PREFILL_GRAPHS = os.environ.get("MING_PREFILL_GRAPHS", "1") == "1"  # graph-captured prefill, padded to buckets
+PREFILL_BUCKETS = (32, 64, 128)  # prompt lengths with a prefill graph (longer prompts run eagerly)
 
 
 def _patch_norms(model):
@@ -189,6 +191,56 @@ def _patch_norms(model):
             module.forward = MethodType(lambda self, h: rms_norm(h, self.weight, self.variance_epsilon), module)
             n += 1
     return n
+
+
+def _kda_padded(a, h, st, pad):
+    """Kimi-delta-attention prefill over a prompt padded at the end to a fixed length (for graph capture).
+
+    Same computation as the model's KDA forward, except that padding tokens leave the layer state untouched:
+    their write strength (beta) is 0 and their decay gate is pushed to exp(0) = 1, so the recurrent state after
+    the padded prompt equals the state after the real tokens; the short-convolution caches are rebuilt from the
+    real tokens only (each holds the last W raw inputs). pad: valid [1, Tmax] (1 = real token), conv_idx [W]
+    (= n_real + arange(W), positions in [old cache | new inputs])."""
+    from fla.ops.kda import fused_recurrent_kda
+    T = h.shape[1]
+    valid = pad["valid"][:, :T, None]
+    state = st.keys
+    cq, ck, cv = st.values
+    xq, xk, xv = a.q_proj(h), a.k_proj(h), a.v_proj(h)
+    q, _ = a.q_conv1d(x=xq, cache=cq, output_final_state=False)
+    k, _ = a.k_conv1d(x=xk, cache=ck, output_final_state=False)
+    v, _ = a.v_conv1d(x=xv, cache=cv, output_final_state=False)
+    g = a.f_proj(h) if a.no_kda_lora else a.f_b_proj(a.f_a_proj(h))
+    g = torch.where(valid > 0, g, torch.full_like(g, -1e30))
+    beta = a.b_proj(h).float().sigmoid() * valid
+    q = q.view(1, T, -1, a.head_k_dim)
+    k = k.view(1, T, -1, a.head_k_dim)
+    v = v.view(1, T, -1, a.head_dim)
+    g = g.view(1, T, -1, a.head_dim)
+    o, new_state = fused_recurrent_kda(q=q, k=k, v=v, g=g, beta=beta, A_log=a.A_log, dt_bias=a.dt_bias,
+                                       initial_state=state, output_final_state=True, use_qk_l2norm_in_kernel=True,
+                                       use_gate_in_kernel=True, lower_bound=a.lower_bound)
+    for c, x in ((cq, xq), (ck, xk), (cv, xv)):
+        c.copy_(torch.cat([c, x.transpose(1, 2).to(c.dtype)], 2).index_select(2, pad["conv_idx"]))
+    state.copy_(new_state)
+    gg = a.g_proj(h) if a.no_kda_lora else a.g_b_proj(a.g_a_proj(h))
+    o = a.o_norm(o, gg.view(1, T, -1, a.head_dim))
+    return a.o_proj(o.reshape(1, T, -1))
+
+
+def _patch_kda(model, th):
+    """KDA layers take the padded path (_kda_padded) while th._pad is set (prefill-graph capture)."""
+    for layer in model.model.layers:
+        a = layer.attention
+        if not hasattr(a, "mode"):
+            continue
+
+        def forward(hidden_states, attention_mask=None, past_key_value=None, _a=a, _orig=a.forward, **kw):
+            if th._pad is None:
+                return _orig(hidden_states=hidden_states, attention_mask=attention_mask,
+                             past_key_value=past_key_value, **kw)
+            return _kda_padded(_a, hidden_states, past_key_value.layers[_a.layer_idx], th._pad), None, past_key_value
+        a.forward = forward
 
 
 def _route_one(block, hidden_states):
@@ -519,10 +571,15 @@ class Thinker:
         self.max_ctx = int(os.environ.get("MING_MAX_CTX", "4096" if self.int8_experts else "8192"))
         self._build_cache()
         self.graph = None
+        self._pad = None
+        self.prefill_graphs = {}
+        _patch_kda(self.model, self)
         self.reset()
         t_c = time.time()
         if use_graphs:
             self._capture()
+            if _PREFILL_GRAPHS:
+                self._capture_prefill()
         log(f"Thinker loaded in {time.time() - t:.1f}s (processor+weights {t_w - t:.1f}s, MoE restack {t_p - t_w:.1f}s, "
             f"setup {t_c - t_p:.1f}s, graphs {time.time() - t_c:.1f}s), {torch.cuda.memory_allocated() / 2**30:.2f} GiB")
 
@@ -559,8 +616,9 @@ class Thinker:
                 for c in st.values:
                     c.zero_()
 
-    def _forward(self, h, pos):
-        """h: [1, T, H] input embeddings, pos: [T] positions. Returns logits of the last position [1, V]."""
+    def _forward(self, h, pos, last=None):
+        """h: [1, T, H] input embeddings, pos: [T] positions. Returns logits of the last position [1, V]
+        (or of position `last`, a 1-element index tensor, when the prompt is padded)."""
         m = self.model.model
         position_ids = pos[None]
         cos_sin = m.rotary_emb(h, position_ids)
@@ -571,7 +629,7 @@ class Thinker:
         for layer in m.layers[: self.n_layers]:
             h = layer(h, attention_mask=mask, position_ids=position_ids, past_key_value=self.cache,
                       cache_position=pos, use_cache=True, position_embeddings=cos_sin)[0]
-        h = m.norm(h[:, -1:])
+        h = m.norm(h[:, -1:] if last is None else h.index_select(1, last))
         return self.model.lm_head(h)[:, -1]
 
     def _decode_step(self):
@@ -607,6 +665,49 @@ class Thinker:
                 self.graphs[L] = g
         torch.cuda.current_stream().wait_stream(s)
         self.graph = True
+        self._clear_state()
+
+    def _capture_prefill(self):
+        """One prefill graph per (padded prompt length, attention-length bucket). Eager prefill of a short prompt
+        is CPU-bound (~700 kernel launches: ~45 ms for 32 tokens while the GPU needs a fraction of that)."""
+        m = self.model.model
+        Tmax, W = max(PREFILL_BUCKETS), self._kda_attn[0].conv_size
+        self.p_h = torch.zeros(1, Tmax, m.config.hidden_size, dtype=DTYPE, device=DEVICE)
+        self.p_pos = torch.zeros(Tmax, dtype=torch.long, device=DEVICE)
+        self.p_valid = torch.zeros(1, Tmax, dtype=torch.float32, device=DEVICE)
+        self.p_conv_idx = torch.arange(W, dtype=torch.long, device=DEVICE)
+        self.p_last = torch.zeros(1, dtype=torch.long, device=DEVICE)
+        self.p_logits = None
+        self.p_W = W
+        s = torch.cuda.Stream(device=DEVICE)
+        s.wait_stream(torch.cuda.current_stream())
+        pool = torch.cuda.graph_pool_handle()
+        self._pad = dict(valid=self.p_valid, conv_idx=self.p_conv_idx)
+        try:
+            with torch.inference_mode(), torch.cuda.stream(s):
+                for Tb in PREFILL_BUCKETS:
+                    for L in self._buckets():
+                        self.cache.attn_len = L
+                        self.p_pos[:Tb].copy_(torch.arange(Tb, device=DEVICE))
+                        self.p_valid.fill_(1.0)
+                        self.p_last.fill_(Tb - 1)
+
+                        def run():
+                            out = self._forward(self.p_h[:, :Tb], self.p_pos[:Tb], self.p_last)
+                            if self.p_logits is None:
+                                self.p_logits = torch.empty_like(out)
+                            self.p_logits.copy_(out)
+                        for _ in range(2):
+                            run()
+                        s.synchronize()
+                        g = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(g, pool=pool, stream=s):
+                            run()
+                        s.synchronize()
+                        self.prefill_graphs[(Tb, L)] = g
+        finally:
+            self._pad = None
+        torch.cuda.current_stream().wait_stream(s)
         self._clear_state()
 
     def reset(self, system_prompt: str | None = None):
@@ -739,9 +840,22 @@ class Thinker:
         # recurrent kernel is faster (first turn with the system prompt: 67 -> 56 ms to the first token)
         for a in self._kda_attn:
             a.mode = "fused_recurrent" if T <= 192 else "chunk"
-        pos = torch.arange(self.cur_len, self.cur_len + T, device=DEVICE)
-        self.cache.attn_len = self.cur_len + T
-        logits = self._forward(h, pos)
+        Tb = next((b for b in PREFILL_BUCKETS if b >= T), None)
+        if self.prefill_graphs and Tb is not None and self.cur_len + Tb <= self.max_ctx:
+            L = next(b for b in self._buckets() if b >= self.cur_len + Tb)
+            self.p_h[:, :T].copy_(h)
+            self.p_h[:, T:Tb].zero_()
+            self.p_pos[:Tb].copy_(torch.arange(self.cur_len, self.cur_len + Tb, device=DEVICE))
+            self.p_valid.zero_()
+            self.p_valid[:, :T] = 1.0
+            self.p_conv_idx.copy_(torch.arange(T, T + self.p_W, device=DEVICE))
+            self.p_last.fill_(T - 1)
+            self.prefill_graphs[(Tb, L)].replay()
+            logits = self.p_logits
+        else:
+            pos = torch.arange(self.cur_len, self.cur_len + T, device=DEVICE)
+            self.cache.attn_len = self.cur_len + T
+            logits = self._forward(h, pos)
         self.cur_len += T
         return int(logits[0].argmax())
 
