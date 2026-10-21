@@ -65,7 +65,8 @@ async def main():
     results = []
     async with websockets.connect(f"ws://{URL}/ws", max_size=2**24) as ws:
         hello = json.loads(await ws.recv())
-        await ws.send(json.dumps({"type": "config", "voice": "US_Stella", "end_ms": 500, "spec_ms": 160,
+        await ws.send(json.dumps({"type": "config", "voice": "US_Stella", "end_ms": 500, "spec_ms": int(os.environ.get("E2E_SPEC_MS", "64")),
+                                  "smart_turn": os.environ.get("E2E_SMART", "1") == "1",
                                   "barge_in": True}))
         if os.environ.get("E2E_RESET", "1") == "1":
             await ws.send(json.dumps({"type": "reset"}))
@@ -90,6 +91,7 @@ async def main():
             t_end = mic.t_last_speech
             pcm, text, first_audio, done, interrupted, saw_interrupt = [], "", None, None, False, False
             sent_interrupt = False
+            pause_ms = None
             deadline = time.perf_counter() + 90
             while time.perf_counter() < deadline:
                 try:
@@ -110,6 +112,8 @@ async def main():
                     text += ev["delta"]
                 elif ev["type"] == "interrupt":
                     saw_interrupt = True
+                elif ev["type"] == "user_end" and pause_ms is None:
+                    pause_ms = ev.get("pause_ms")
                 elif ev["type"] == "done":
                     done = ev
                     if settle > 0:  # keep collecting: the turn may have been split into several replies
@@ -123,7 +127,10 @@ async def main():
             sf.write(os.path.join(HERE, "e2e", "out", f"{name}.wav"), audio, 44100)
             lat = None if first_audio is None else round((first_audio - t_end) * 1000)
             heard = (await asyncio.get_running_loop().run_in_executor(None, asr, audio)) if len(audio) > 4410 else ""
-            r = dict(name=name, latency_ms=lat, reply_text=text.strip(), heard=heard,
+            fa = ((done or {}).get("metrics") or {}).get("first_audio_sent")
+            # what a listener perceives: silence until the server ended the turn (VAD-measured) + time to audio
+            perceived = None if pause_ms is None or fa is None else pause_ms + max(0, fa)
+            r = dict(name=name, latency_ms=lat, perceived_ms=perceived, pause_ms=pause_ms, reply_text=text.strip(), heard=heard,
                      audio_s=round(len(audio) / 44100, 2), metrics=(done or {}).get("metrics"),
                      interrupted=bool(done and done.get("interrupted")), saw_interrupt=saw_interrupt)
             results.append(r)
@@ -145,7 +152,9 @@ async def main():
 
     print("\n=== summary ===")
     lats = [r["latency_ms"] for r in results if r["latency_ms"] is not None and r["name"] != "after_bargein"]
-    print("speech-end -> first audio byte (ms):", lats, " median", int(np.median(lats)) if lats else None)
+    print("clip end -> first audio byte (ms):", lats, " median", int(np.median(lats)) if lats else None)
+    per = [r["perceived_ms"] for r in results if r["perceived_ms"] is not None and r["name"] != "after_bargein"]
+    print("perceived: silence after speech -> first audio (ms):", per, " median", int(np.median(per)) if per else None)
     checks = {
         "every turn produced audio": all(r["audio_s"] > 0.3 for r in results[:5]),
         "capital answer mentions Paris": "paris" in (results[0]["reply_text"] + results[0]["heard"]).lower(),

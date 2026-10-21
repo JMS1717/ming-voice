@@ -3,10 +3,11 @@
 Low-latency, fully local **speech-to-speech** voice assistant built on
 [inclusionAI/Ming-3.0-audio-tiny](https://huggingface.co/inclusionAI/Ming-3.0-audio-tiny), running on an
 **AMD Radeon GPU** (ROCm 7.2 inside WSL2 on Windows). Talk to it in the browser; it answers out loud,
-typically starting to speak **~0.2 s after the end-of-turn pause** (≈0.7 s after you stop talking with the
-default 500 ms pause).
+typically starting to speak **~0.4 s after you stop talking**.
 
 * Hands-free conversation with voice activity detection, or push-to-talk
+* **Smart turn detection** ([Smart Turn v3](https://huggingface.co/pipecat-ai/smart-turn-v3)): judges from your
+  words and intonation whether you've finished, answering sooner when you have and waiting when you're mid-sentence
 * **Speculative turn-taking**: the reply starts generating during your pause and is discarded if you keep talking
 * Barge-in: talk over the assistant to interrupt it
 * Streaming speech output (audio starts after the first ~160 ms of speech are generated)
@@ -21,8 +22,8 @@ Everything runs locally; no audio leaves the machine.
 
 | | |
 |---|---|
-| Server time from end of your turn to first audio | ~0.2 s median (0–0.13 s after the end-of-turn pause, thanks to speculation) |
-| Thinker (audio LLM, 9.3B MoE / 2.7B active) | ~67 tokens/s decode, ~170 ms prefill for a short utterance |
+| From the end of your speech to the first audio | ~0.39 s median (end-of-turn pause ~0.26 s when Smart Turn is confident, generation already under way) |
+| Thinker (audio LLM, 9.3B MoE / 2.7B active) | ~67 tokens/s decode; first token ~80 ms after a short spoken turn (~65 ms typed) |
 | Talker (speech synthesis) | ~0.3× real time end to end; 13 ms per 80 ms of audio for the core step |
 | Startup | ~30 s (first start after install: ~1–2 min to compile kernels) |
 | VRAM | ~20.5 GB bf16 · ~12.5 GB with int8 experts (auto on < 23 GB cards) |
@@ -74,9 +75,10 @@ you're done: it holds ~20 GB of VRAM and keeps the GPU out of its deepest idle s
 
 | Setting | Default | Meaning |
 |---|---|---|
-| End-of-turn pause | 500 ms | Silence that ends your turn. Lower = snappier, but more likely to cut you off. |
+| Smart turn detection | on | Ends the turn after 250 ms of silence when you've clearly finished, waits up to 1.5 s when you sound mid-sentence, and uses the end-of-turn pause otherwise. |
+| End-of-turn pause | 500 ms | Silence that ends your turn (when Smart Turn is off or unsure). Lower = snappier, but more likely to cut you off. |
 | Extra pause after short phrases | 250 ms | Added when you've said < 1 s ("Can you tell me…"), which is usually unfinished. |
-| Start thinking after | 160 ms | When speculative generation starts. |
+| Start thinking after | 64 ms | When speculative generation starts (it is discarded if you keep talking). |
 | Voice detection sensitivity | 0.50 | Silero VAD threshold. |
 | Playback buffer | 100 ms | Client jitter buffer. |
 
@@ -90,6 +92,8 @@ you're done: it holds ~20 GB of VRAM and keeps the GPU out of its deepest idle s
 | `MING_INT8_EXPERTS` | `auto` | Weight-only int8 for the MoE experts (`1`/`0`/`auto` = int8 below 23 GB VRAM). Measured vs bf16: identical greedy replies and transcripts on the test set, logit cosine ≥ 0.997, +2% NLL. |
 | `MING_VRAM_LIMIT_GB` | – | Cap PyTorch's VRAM use (to emulate a smaller card). |
 | `MING_CFM_STEPS` | `10` | Talker flow-matching steps (fewer is faster but degrades speech). |
+| `MING_SMART_TURN` | `1` | Smart Turn end-of-turn detection (needs `model_extra/smart-turn-v3.2-cpu.onnx`, downloaded by `setup_env.sh`). |
+| `MING_FUSED_PREFILL` | `1` | Grouped Triton MoE kernels for prompt prefill (`0` = the reference per-expert loop). |
 | `MING_FAST_TALKER` / `MING_GRAPHS` | `1` / `1` | Fused Triton Talker path / HIP graphs (set `0` to fall back to the reference code). |
 | `MING_TRACEMALLOC` | `0` | Python allocation tracing for `/api/debug/mem`. |
 
@@ -97,11 +101,12 @@ you're done: it holds ~20 GB of VRAM and keeps the GPU out of its deepest idle s
 
 ```
 browser (static/index.html) ⇄ WebSocket: 16 kHz PCM in / 44.1 kHz PCM out ⇄ server.py
-  server.py   Silero VAD · speculative turn-taking with rollback · barge-in · push-to-talk
-              · voice cloning / TTS / ASR HTTP endpoints · background transcription
+  server.py   Silero VAD · Smart Turn (turn_detect.py) · speculative turn-taking with rollback · barge-in
+              · push-to-talk · voice cloning / TTS / ASR HTTP endpoints · background transcription
   engine.py   Thinker: Ming audio LLM (hybrid Kimi-delta-attention / MLA, 128-expert MoE)
                 - static-state cache, one HIP graph per attention-length bucket (14 ms/token)
-                - fused Triton MoE decode with the shared expert folded in (fused_moe.py)
+                - fused Triton MoE with the shared expert folded in (fused_moe.py): a GEMV kernel pair
+                  for decode, grouped tl.dot kernels for prefill (tokens sorted by expert on the GPU)
                 - multi-turn KV reuse, snapshot/restore for speculation, text-history rollover
               Talker: Qwen2 + 10-step flow-matching DiT + AudioVAE
                 - fused Triton fast path (fast_talker.py, fastlinear.py): RMSNorm/bias/activation/
@@ -113,7 +118,8 @@ browser (static/index.html) ⇄ WebSocket: 16 kHz PCM in / 44.1 kHz PCM out ⇄ 
 
 The main speedups over the reference implementation came from: replacing rocBLAS's slow small-M biased GEMMs
 (~45 µs) with fused Triton kernels (~20 µs), cutting kernel launches (RMSNorm decomposed into ~6 kernels on
-ROCm), graph-capturing every per-token step, and hiding model latency inside the end-of-turn pause.
+ROCm; the reference MoE prefill launched ~5 kernels per active expert per layer plus a host sync, ~120 ms per
+turn, now ~15 ms), graph-capturing every per-token step, and hiding model latency inside the end-of-turn pause.
 
 ## Troubleshooting
 
@@ -133,7 +139,11 @@ ROCm), graph-capturing every per-token step, and hiding model latency inside the
   handling, barge-in; transcribes the spoken replies (`dev/make_questions.py` regenerates its audio)
 * `dev/robustness.py` — long input, Chinese, noise-only, double barge-in
 * `dev/eval_steps.py` — speech quality (ASR round-trip WER) vs. diffusion steps (standalone, needs the GPU)
+* `dev/e2e_compare.sh 64:1 160:0` — e2e under several `spec_ms:smart_turn` settings
 * `dev/test_fast_tail.py`, `dev/test_fast_llm.py`, `dev/test_sensitivity.py` — fused paths vs. reference
+* `dev/test_moe_prefill.py` (`TUNE=1` to re-tune), `dev/test_prefill.py`, `dev/test_prefill_layer.py` — fused
+  prefill MoE: accuracy vs. fp32, replies, time to first token
+* `dev/test_turn.py` — Smart Turn scores on complete vs. truncated questions
 * `dev/tts_check.py`, `dev/test_clone.py`, `dev/test_takeover.py` — API checks
 
 ## Credits & licenses
@@ -142,5 +152,6 @@ ROCm), graph-capturing every per-token step, and hiding model latency inside the
 * Model: [Ming-3.0-audio-tiny](https://huggingface.co/inclusionAI/Ming-3.0-audio-tiny) by inclusionAI (MIT);
   weights are downloaded from Hugging Face and not included here. The model's own code is loaded from the
   model folder with `trust_remote_code`.
+* [Smart Turn v3](https://github.com/pipecat-ai/smart-turn) by Pipecat (BSD-2-Clause), downloaded by `setup_env.sh`.
 * [Silero VAD](https://github.com/snakers4/silero-vad) (MIT), [flash-linear-attention](https://github.com/fla-org/flash-linear-attention) (MIT),
   PyTorch / ROCm / Triton.

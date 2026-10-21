@@ -147,6 +147,22 @@ def _prestack_experts(model_dir):
     block._prestacked = True
 
 
+_FUSED_PREFILL = os.environ.get("MING_FUSED_PREFILL", "1") == "1"
+
+
+def _moe_prefill(block, x, topk_idx, topk_weight):
+    """Multi-token MoE (prompt prefill) through the grouped Triton kernels: one launch pair per layer
+    instead of one small GEMM pair per active expert plus a host sync."""
+    from fused_moe import fused_moe_prefill
+    N = x.shape[0]
+    E = block.shared_id
+    ids = torch.cat([topk_idx, E.expand(N, 1).to(topk_idx.dtype)], 1)
+    wts = torch.cat([topk_weight.float(), block.one.expand(N, 1)], 1)
+    if getattr(block, "w_gu", None) is not None:
+        return fused_moe_prefill(x, block.w_gu, block.w_d, ids, wts)
+    return fused_moe_prefill(x, block.q_gu, block.q_d, ids, wts, s_gu=block.s_gu, s_d=block.s_d)
+
+
 def _patch_moe(model):
     """Restack expert weights (+ shared expert as index E) as views, cache fp32 router weights,
     and route single-token MoE through the fused Triton decode kernels."""
@@ -207,13 +223,16 @@ def _patch_moe(model):
 
         def forward(self, hidden_states, _orig=orig_forward):
             bsz, seq_len, h = hidden_states.shape
-            if bsz * seq_len != 1:
+            if bsz * seq_len != 1 and not _FUSED_PREFILL:
                 return _orig(hidden_states)
             topk_idx, topk_weight, router_logits = self.gate(hidden_states)
+            aux = (router_logits.view(bsz, seq_len, -1), topk_idx.view(bsz, seq_len, -1))
+            if bsz * seq_len != 1:
+                return _moe_prefill(self, hidden_states.view(-1, h), topk_idx, topk_weight).view(bsz, seq_len, h), aux
             ids = torch.cat([topk_idx.view(-1), self.shared_id])
             wts = torch.cat([topk_weight.view(-1).float(), self.one])
             y = fused_moe_decode(hidden_states.view(1, h), self.w_gu, self.w_d, ids, wts)
-            return y.view(bsz, seq_len, h), (router_logits.view(bsz, seq_len, -1), topk_idx.view(bsz, seq_len, -1))
+            return y.view(bsz, seq_len, h), aux
 
         module.forward = MethodType(forward, module)
         n += 1
@@ -273,6 +292,8 @@ def _quantize_moe_int8(model):
                 y = fused_moe_decode(hidden_states.view(1, h), self.q_gu, self.q_d, ids, wts,
                                      s_gu=self.s_gu, s_d=self.s_d)
                 return y.view(bsz, seq_len, h), aux
+            if _FUSED_PREFILL:
+                return _moe_prefill(self, hidden_states.view(-1, h), topk_idx, topk_weight).view(bsz, seq_len, h), aux
             return self._prefill(hidden_states.view(-1, h), topk_idx, topk_weight).view(bsz, seq_len, h), aux
 
         def _prefill(self, x, topk_idx, topk_weight):

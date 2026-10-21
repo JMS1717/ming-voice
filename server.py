@@ -17,11 +17,18 @@ import queue
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+
+import warnings
+
+# harmless library chatter that would otherwise bury the server log
+warnings.filterwarnings("ignore", message=".*Efficient attention on Current AMD GPU.*")
+warnings.filterwarnings("ignore", message=".*attention mask API.*", category=FutureWarning)
 
 import numpy as np
 import soundfile as sf
@@ -38,6 +45,7 @@ VOICE_DIR = HERE / "voices"  # cloned voices: tiny speaker-embedding files
 FRAME = 512  # 32 ms @ 16 kHz (Silero VAD window)
 ENGINE: dict = {}
 GPU_TURN = threading.Lock()  # one reply generating at a time
+TURN_POOL = ThreadPoolExecutor(1)  # Smart Turn runs off the event loop (~20 ms on the CPU)
 
 
 def _load():
@@ -54,6 +62,14 @@ def _load():
     gc.collect()
     ENGINE["talker"] = Talker(use_graphs=os.environ.get("MING_GRAPHS", "1") == "1")
     ENGINE["vad_proto"] = load_silero_vad
+    ENGINE["turn"] = None
+    if os.environ.get("MING_SMART_TURN", "1") == "1":
+        import turn_detect
+        if turn_detect.available():
+            ENGINE["turn"] = turn_detect.TurnDetector()
+            ENGINE["turn"].prob(np.zeros(16000, np.float32))
+        else:
+            log(f"smart turn model not found ({turn_detect.MODEL}); using the fixed end-of-turn pause")
     ENGINE["custom_voices"] = {}
     VOICE_DIR.mkdir(exist_ok=True)
     for f in sorted(VOICE_DIR.glob("*.pt")):
@@ -318,8 +334,15 @@ class Session:
         self.voice = VOICES[0]
         self.barge_in = True
         self.end_ms = 500
-        self.spec_ms = 160  # start generating speculatively after this much silence (0 = off)
+        self.spec_ms = 64  # start generating speculatively after this much silence (0 = off)
         self.short_extra_ms = 250  # extra end-of-turn wait when the utterance is under 1 s of speech
+        # Smart Turn: once the pause starts, a classifier judges from the audio whether the user has finished.
+        # Confident "finished" ends the turn after fast_end_ms; "unfinished" stretches the wait to slow_end_ms.
+        self.smart_turn = ENGINE.get("turn") is not None
+        self.fast_end_ms = 250
+        self.slow_end_ms = 1500
+        self.turn_fut = None
+        self.turn_p = None
         self.threshold = 0.5
         self.barge_threshold = 0.75
         self.barge_ms = 250
@@ -338,6 +361,8 @@ class Session:
         self.frames: list[np.ndarray] = []
         self.speech_frames = 0
         self.silence_frames = 0
+        self.turn_fut = None
+        self.turn_p = None
 
     def _put(self, kind, payload):
         self.loop.call_soon_threadsafe(self.out.put_nowait, (kind, payload))
@@ -406,14 +431,14 @@ class Session:
             self.speech_frames += 1
             if self.silence_frames:
                 self._abort_spec()  # user kept talking: discard the speculative reply
+                self.turn_fut = self.turn_p = None
             self.silence_frames = 0
             return
         self.silence_frames += 1
         silence_ms = self.silence_frames * FRAME / 16
         speech_s = self.speech_frames * FRAME / 16000
         long_enough = speech_s >= 0.25
-        # very short utterances ("Can you tell me...") are usually unfinished: wait a bit longer
-        end_ms = self.end_ms + (self.short_extra_ms if speech_s < 1.0 else 0)
+        end_ms = self._end_of_turn_ms(silence_ms, speech_s, long_enough)
         if (self.spec_ms and self.spec is None and long_enough and silence_ms >= self.spec_ms
                 and silence_ms < end_ms):
             self.spec = self.start_reply(self._utterance(), speculative=True)
@@ -426,7 +451,8 @@ class Session:
                 self._abort_spec()
                 self.emit_json({"type": "vad", "state": "ignored"})
                 return
-            msg = {"type": "user_end", "seconds": round(len(audio) / 16000, 2)}
+            msg = {"type": "user_end", "seconds": round(len(audio) / 16000, 2), "pause_ms": round(silence_ms),
+                   "turn_p": None if self.turn_p is None else round(self.turn_p, 3)}
             spec, self.spec = self.spec, None
             if spec is not None:
                 msg["id"] = spec.id
@@ -434,6 +460,29 @@ class Session:
                 self.reply = spec
             else:
                 self.start_reply(audio, user_end_msg=msg)
+
+    def _end_of_turn_ms(self, silence_ms, speech_s, long_enough):
+        # very short utterances ("Can you tell me...") are usually unfinished: wait a bit longer
+        extra = self.short_extra_ms if speech_s < 1.0 else 0
+        det = ENGINE.get("turn")
+        if not (self.smart_turn and det is not None and long_enough):
+            return self.end_ms + extra
+        if self.turn_fut is None and silence_ms >= 64:
+            self.turn_fut = TURN_POOL.submit(det.prob, np.concatenate(self.frames))
+        if self.turn_p is None and self.turn_fut is not None and self.turn_fut.done():
+            try:
+                self.turn_p = self.turn_fut.result()
+            except Exception as e:
+                log("smart turn error:", repr(e))
+                self.turn_p = 0.5
+        p = self.turn_p
+        if p is None:
+            return self.end_ms + extra
+        if p >= 0.8:
+            return min(self.end_ms, self.fast_end_ms) + extra
+        if p < 0.3:
+            return max(self.end_ms, self.slow_end_ms)
+        return self.end_ms + extra
 
     def _utterance(self):
         audio = np.concatenate(self.frames)
@@ -567,6 +616,8 @@ class Session:
                 self.voice = msg["voice"]
             if "barge_in" in msg:
                 self.barge_in = bool(msg["barge_in"])
+            if "smart_turn" in msg:
+                self.smart_turn = bool(msg["smart_turn"]) and ENGINE.get("turn") is not None
             if "end_ms" in msg:
                 self.end_ms = int(max(200, min(2000, msg["end_ms"])))
             if "short_extra_ms" in msg:

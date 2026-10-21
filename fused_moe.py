@@ -83,6 +83,118 @@ def fused_moe_decode(x, w_gu, w_d, ids, weights, a_buf=None, out=None, s_gu=None
     return y
 
 
+# ---------------------------------------------------------------- multi-token (prefill) grouped MoE
+# (token, expert) pairs are sorted by expert and padded to BM-row blocks, all on the GPU (no host sync);
+# each program computes one BM x BN tile of one expert's projection with tl.dot. Blocks past the last
+# expert's padded range exit at once.
+
+
+@triton.jit
+def _moe_gu_grouped(x_ptr, sorted_ptr, bexp_ptr, wgu_ptr, sgu_ptr, a_ptr, P, H, I, KP1,
+                    s_we, s_wn, s_se,
+                    QUANT: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    e = tl.load(bexp_ptr + pid_m).to(tl.int64)
+    if e < 0:
+        return
+    rows = tl.load(sorted_ptr + pid_m * BM + tl.arange(0, BM))
+    valid = rows < P
+    tok = (rows // KP1).to(tl.int64)
+    offs_n = pid_n * BN + tl.arange(0, BN)
+    base = wgu_ptr + e * s_we
+    acc_g = tl.zeros((BM, BN), dtype=tl.float32)
+    acc_u = tl.zeros((BM, BN), dtype=tl.float32)
+    for k0 in range(0, H, BK):
+        offs_k = k0 + tl.arange(0, BK)
+        a = tl.load(x_ptr + tok[:, None] * H + offs_k[None, :], mask=valid[:, None], other=0.0)
+        wg = tl.load(base + offs_n[None, :] * s_wn + offs_k[:, None]).to(tl.bfloat16)
+        wu = tl.load(base + (offs_n[None, :] + I) * s_wn + offs_k[:, None]).to(tl.bfloat16)
+        acc_g = tl.dot(a, wg, acc_g)
+        acc_u = tl.dot(a, wu, acc_u)
+    if QUANT:
+        acc_g *= tl.load(sgu_ptr + e * s_se + offs_n)[None, :]
+        acc_u *= tl.load(sgu_ptr + e * s_se + I + offs_n)[None, :]
+    g = acc_g.to(tl.bfloat16).to(tl.float32)
+    u = acc_u.to(tl.bfloat16).to(tl.float32)
+    g = (g / (1.0 + tl.exp(-g))).to(tl.bfloat16).to(tl.float32)
+    tl.store(a_ptr + rows[:, None].to(tl.int64) * I + offs_n[None, :], (g * u).to(tl.bfloat16), mask=valid[:, None])
+
+
+@triton.jit
+def _moe_down_grouped(a_ptr, sorted_ptr, bexp_ptr, wd_ptr, sd_ptr, w_ptr, o_ptr, P, H, I,
+                      s_we, s_wn, s_se,
+                      QUANT: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    e = tl.load(bexp_ptr + pid_m).to(tl.int64)
+    if e < 0:
+        return
+    rows = tl.load(sorted_ptr + pid_m * BM + tl.arange(0, BM))
+    valid = rows < P
+    r64 = rows.to(tl.int64)
+    offs_n = pid_n * BN + tl.arange(0, BN)
+    base = wd_ptr + e * s_we
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+    for i0 in range(0, I, BK):
+        offs_i = i0 + tl.arange(0, BK)
+        a = tl.load(a_ptr + r64[:, None] * I + offs_i[None, :], mask=valid[:, None], other=0.0)
+        w = tl.load(base + offs_n[None, :] * s_wn + offs_i[:, None]).to(tl.bfloat16)
+        acc = tl.dot(a, w, acc)
+    if QUANT:
+        acc *= tl.load(sd_ptr + e * s_se + offs_n)[None, :]
+    wk = tl.load(w_ptr + rows, mask=valid, other=0.0)
+    out = acc.to(tl.bfloat16).to(tl.float32) * wk[:, None]
+    tl.store(o_ptr + r64[:, None] * H + offs_n[None, :], out, mask=valid[:, None])
+
+
+GCFG = dict(A=dict(BM=32, BN=32, BK=128, num_warps=4), B=dict(BM=32, BN=64, BK=64, num_warps=4))  # dev/test_moe_prefill.py TUNE=1
+
+
+def _align_blocks(flat, E1, BM):
+    """Sort pair indices by expert, padding each expert's run to a multiple of BM (GPU only, no sync).
+    Returns sorted pair ids (P = padding) and the expert of each BM block (-1 = unused)."""
+    P = flat.numel()
+    dev = flat.device
+    counts = torch.bincount(flat, minlength=E1)
+    padded = (counts + BM - 1) // BM * BM
+    pend = padded.cumsum(0)
+    pstart = pend - padded
+    order = torch.argsort(flat, stable=True)
+    se = flat[order]
+    cstart = counts.cumsum(0) - counts
+    dest = pstart[se] + torch.arange(P, device=dev) - cstart[se]
+    nb = (P + E1 * (BM - 1) + BM - 1) // BM
+    sorted_ids = torch.full((nb * BM,), P, dtype=torch.int32, device=dev)
+    sorted_ids[dest] = order.to(torch.int32)
+    bexp = torch.searchsorted(pend, torch.arange(nb, device=dev) * BM, right=True)
+    bexp = torch.where(bexp < E1, bexp, -1).to(torch.int32)
+    return sorted_ids, bexp, nb
+
+
+def fused_moe_prefill(x, w_gu, w_d, ids, weights, s_gu=None, s_d=None):
+    """x: [N, H] bf16; ids: [N, K+1] expert ids per token (shared expert included); weights: [N, K+1] fp32.
+    Returns [N, H] bf16 = sum_k weights[:, k] * expert_k(x)."""
+    N, H = x.shape
+    KP1 = ids.shape[1]
+    E1, I = w_d.shape[0], w_d.shape[-1]
+    P = N * KP1
+    quant = s_gu is not None
+    ca, cb = GCFG["A"], GCFG["B"]
+    assert ca["BM"] == cb["BM"]
+    sorted_ids, bexp, nb = _align_blocks(ids.reshape(-1), E1, ca["BM"])
+    a = torch.empty(P, I, device=x.device, dtype=torch.bfloat16)
+    _moe_gu_grouped[(nb, I // ca["BN"])](x.contiguous(), sorted_ids, bexp, w_gu, s_gu if quant else w_gu, a, P, H, I, KP1,
+                                         w_gu.stride(0), w_gu.stride(1), s_gu.stride(0) if quant else 0,
+                                         QUANT=quant, BM=ca["BM"], BN=ca["BN"], BK=ca["BK"], num_warps=ca["num_warps"])
+    o = torch.empty(P, H, device=x.device, dtype=torch.float32)
+    _moe_down_grouped[(nb, H // cb["BN"])](a, sorted_ids, bexp, w_d, s_d if quant else w_d,
+                                           weights.reshape(-1).float().contiguous(), o, P, H, I,
+                                           w_d.stride(0), w_d.stride(1), s_d.stride(0) if quant else 0,
+                                           QUANT=quant, BM=cb["BM"], BN=cb["BN"], BK=cb["BK"], num_warps=cb["num_warps"])
+    return o.view(N, KP1, H).sum(1).to(x.dtype)
+
+
 def quantize_rows_int8(w):
     """Symmetric per-output-row int8: w [..., N, K] -> (int8 [..., N, K], fp32 scales [..., N])."""
     amax = w.abs().amax(dim=-1).float().clamp_min(1e-8)

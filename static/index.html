@@ -191,9 +191,10 @@
       <label class="check"><input type="checkbox" id="barge" checked> Interrupt the assistant by talking (barge-in)</label>
 
       <h3>Timing</h3>
+      <label class="check" title="A small model listens to how you said it (words and intonation) and answers sooner when you've clearly finished, or waits longer (up to 1.5 s) when you sound mid-sentence."><input type="checkbox" id="smart" checked> Smart turn detection</label>
       <div class="field"><span>End-of-turn pause <b id="endv">500 ms</b></span><input id="end" type="range" min="200" max="1500" step="50" value="500"></div>
       <div class="field"><span>Extra pause after short phrases <b id="shortv">250 ms</b></span><input id="short" type="range" min="0" max="600" step="50" value="250"></div>
-      <div class="field"><span>Start thinking after <b id="specv">160 ms</b></span><input id="spec" type="range" min="0" max="400" step="20" value="160"></div>
+      <div class="field"><span>Start thinking after <b id="specv">64 ms</b></span><input id="spec" type="range" min="0" max="416" step="32" value="64"></div>
       <div class="field"><span>Voice detection sensitivity <b id="thv">0.50</b></span><input id="th" type="range" min="0.2" max="0.9" step="0.05" value="0.5"></div>
       <div class="field"><span>Playback buffer <b id="bufv">100 ms</b></span><input id="buf" type="range" min="0" max="500" step="20" value="100"></div>
 
@@ -222,6 +223,7 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem('mingvoice.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem('mingvoice.' + k, JSON.stringify(v)); } catch {} },
 };
+if (store.get('cfgv', 1) < 2) { try { localStorage.removeItem('mingvoice.spec'); } catch {} store.set('cfgv', 2); }  // new default
 const PRESETS = {
   assistant: "You are a friendly, helpful voice assistant in a live spoken conversation. Listen to the user's speech and reply naturally in the same language they speak. Keep replies short and conversational, usually one to three sentences, unless the user asks for more detail. Use plain spoken language only: no markdown, bullet points, emojis, or code.",
   concise: "You are a precise expert voice assistant. Answer the user's spoken question directly in one or two short sentences, with no filler or preamble. Use plain spoken language only: no markdown, lists, or code.",
@@ -234,7 +236,7 @@ let ws = null, ctx = null, micStream = null, micSrc = null, capNode = null, outG
 let audioEl = null, msDest = null;
 let running = false, muted = false, mode = store.get('mode', 'vad'), pttHeld = false;
 let sampleRate = 44100, nextTime = 0, sources = [], state = 'off';
-let inLevel = 0, outLevel = 0, tUserEnd = null, firstSound = false, latencies = [];
+let inLevel = 0, outLevel = 0, tUserEnd = null, userPauseMs = 0, firstSound = false, latencies = [];
 let botMsg = null, botText = '', botPcm = [];
 let capRing = [], capRingLen = 0, speechStartIdx = null;  // recent mic audio for replaying user turns
 let transcript = [];
@@ -270,9 +272,9 @@ for (const id of Object.keys(SL)) {
   const upd = () => { $(id + 'v').textContent = SL[id]($(id).value); store.set(id, $(id).value); if (id === 'vol') applyVol(); else sendCfg(); };
   $(id).addEventListener('input', upd); upd();
 }
-for (const id of ['barge', 'aec', 'ns', 'agc']) {
+for (const id of ['barge', 'smart', 'aec', 'ns', 'agc']) {
   $(id).checked = store.get(id, $(id).checked);
-  $(id).addEventListener('change', () => { store.set(id, $(id).checked); if (id === 'barge') sendCfg(); else if (running) restartMic(); });
+  $(id).addEventListener('change', () => { store.set(id, $(id).checked); if (id === 'barge' || id === 'smart') sendCfg(); else if (running) restartMic(); });
 }
 $('voice').addEventListener('change', () => { store.set('voice', $('voice').value); sendCfg(); });
 function applyVol() { if (outGain) outGain.gain.value = $('vol').value / 100; }
@@ -285,7 +287,7 @@ function setMode(m) {
 $('modeSeg').addEventListener('click', (e) => { if (e.target.dataset.mode) setMode(e.target.dataset.mode); });
 function sendCfg() {
   if (!ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({ type: 'config', voice: $('voice').value, barge_in: $('barge').checked, mode,
+  ws.send(JSON.stringify({ type: 'config', voice: $('voice').value, barge_in: $('barge').checked, smart_turn: $('smart').checked, mode,
     end_ms: +$('end').value, short_extra_ms: +$('short').value, spec_ms: +$('spec').value, threshold: +$('th').value }));
 }
 $('preset').value = store.get('preset', 'assistant');
@@ -507,7 +509,7 @@ function playChunk(buf) {
   src.start(nextTime);
   if (!firstSound && tUserEnd !== null) {
     firstSound = true;
-    const ms = Math.round(performance.now() - tUserEnd + (nextTime - now) * 1000) + (mode === 'vad' ? +$('end').value : 0);
+    const ms = Math.round(performance.now() - tUserEnd + (nextTime - now) * 1000) + userPauseMs;
     latencies.push(ms); latencies = latencies.slice(-10);
     const med = [...latencies].sort((a, b) => a - b)[Math.floor(latencies.length / 2)];
     $('sLast').textContent = fmtMs(ms); $('sMed').textContent = fmtMs(med);
@@ -577,7 +579,7 @@ function connect() {
         else if (m.state === 'ignored') { speechStartIdx = null; restState(); }
         break;
       case 'user_end': {
-        tUserEnd = performance.now(); firstSound = false;
+        tUserEnd = performance.now(); firstSound = false; userPauseMs = m.pause_ms || 0;
         stopPlayback();
         let el;
         if (m.seconds) {

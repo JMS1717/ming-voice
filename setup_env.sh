@@ -25,6 +25,9 @@ rm -f .venv/lib/python3.12/site-packages/torch/lib/libhsa-runtime64.so*
 if [ ! -f model/model.safetensors.index.json ]; then
   hf download inclusionAI/Ming-3.0-audio-tiny --local-dir model
 fi
+# Smart Turn v3 end-of-turn classifier (8 MB, pipecat-ai, BSD-2) into ./model_extra
+mkdir -p model_extra
+[ -s model_extra/smart-turn-v3.2-cpu.onnx ] || hf download pipecat-ai/smart-turn-v3 smart-turn-v3.2-cpu.onnx --local-dir model_extra
 # Sample clip used by some dev tests (from the Ming-3.0-audio-flash repo, MIT)
 mkdir -p samples
 [ -s samples/introduce_ant_group.wav ] || wget -q -O samples/introduce_ant_group.wav \

@@ -14,10 +14,12 @@ def load(path):
     return w
 
 
-async def scenario(name, chunks, wait=25.0):
+async def scenario(name, chunks, wait=25.0, config=None):
     """chunks: list of (audio, gap_seconds_after). Streams in real time; collects events."""
     async with websockets.connect("ws://localhost:8000/ws", max_size=2**24) as ws:
         await ws.recv()
+        if config:
+            await ws.send(json.dumps({"type": "config", **config}))
         await ws.send(json.dumps({"type": "reset"}))
         ev = {"user_end": 0, "interrupt": 0, "done": [], "error": [], "audio_s": 0.0}
 
@@ -58,10 +60,19 @@ async def main():
     zh = load(os.path.join(HERE, "samples", "introduce_ant_group.wav"))
     rng = np.random.default_rng(1)
     noise = (rng.standard_normal(16000 * 3) * 0.02).astype(np.float32)
-    long_q = np.concatenate([np.concatenate([capital, sleep_q, story]) for _ in range(3)] + [capital])
-    if os.environ.get("ONLY") != "barge": await scenario("long utterance", [(long_q, 0)], wait=20)
-    if os.environ.get("ONLY") != "barge": await scenario("chinese", [(zh, 0)], wait=15)
-    if os.environ.get("ONLY") != "barge": await scenario("noise only", [(noise, 0)], wait=6)
-    await scenario("double barge-in", [(story, 3.0), (interrupt, 1.5), (capital, 0)], wait=15)
+    def trim(w, keep=0.12):  # drop the clips' leading/trailing silence so they join into continuous speech
+        loud = np.flatnonzero(np.abs(w) > 0.02)
+        return w[max(0, loud[0] - int(keep * 16000)): loud[-1] + int(keep * 16000)]
+    long_q = np.concatenate([np.concatenate([trim(capital), trim(sleep_q), trim(story)]) for _ in range(3)] + [trim(capital)])
+    only = os.environ.get("ONLY")  # long | chinese | noise | barge
+    if only in (None, "long"):
+        # one 55 s turn: the clips are complete questions, which Smart Turn would (rightly) answer one by one
+        await scenario("long utterance", [(long_q, 0)], wait=20, config={"smart_turn": False})
+    if only in (None, "chinese"):
+        await scenario("chinese", [(zh, 0)], wait=15)
+    if only in (None, "noise"):
+        await scenario("noise only", [(noise, 0)], wait=6)
+    if only in (None, "barge"):
+        await scenario("double barge-in", [(story, 3.0), (interrupt, 1.5), (capital, 0)], wait=15)
 
 asyncio.run(main())
