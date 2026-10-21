@@ -16,6 +16,8 @@ certs/
 .jellyfin.json
 .brave_key
 .timers.json
+.conversation.json
+.conversation.tmp
 .lan_info.json
 server.log
 *.log

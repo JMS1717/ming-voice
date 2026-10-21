@@ -1470,11 +1470,50 @@ def _units(s: str) -> int:
     return len(_CJK.sub(" ", s).split()) + len(_CJK.findall(s)) // 2
 
 
+_CURRENCY = {"$": ("dollar", "dollars", "cent", "cents"), "€": ("euro", "euros", "cent", "cents"),
+             "£": ("pound", "pounds", "penny", "pence")}
+
+
+def _money(m: re.Match) -> str:
+    one, many, sub1, subn = _CURRENCY[m[1]]
+    whole, cents, scale = m[2], m[3], m[4]
+    if scale:  # $5 million -> 5 million dollars ($1.5 billion too)
+        return f"{whole}{'.' + cents if cents else ''} {scale} {many}"
+    s = f"{whole} {one if whole == '1' else many}"
+    if cents and cents.strip("0"):
+        c = str(int((cents + "0")[:2]))  # ($1.5: 50 cents)
+        s += f" and {c} {sub1 if c == '1' else subn}"
+    return s
+
+
+# What the talker reads wrong (checked by speaking each and transcribing it back): it drops "×", stops reading at
+# "km/h" and at spaced dashes, says "minus" for scores and ranges, loses the sign of "-5", reads "€40" as
+# "euro forty point" and "12:00" as "twelve zero".
+_SPEECH_SUBS = [(re.compile(p, re.I), r) for p, r in (
+    (r"\s*×\s*", " times "),
+    (r"(?<=\d)x\b", " times"),  # 3x faster
+    (r"(?<=\d)\s*[–-]\s*(?=\d)", " to "),  # 24-17, 5-10 minutes, 2025–2026
+    (r"\s+[–—-]\s+|—", ", "),  # spaced dashes (and em dashes) are pauses
+    (r"(?<![\w.])[-−](?=\d)", "minus "),  # -5°C
+    (r"\bkm/h\b|\bkph\b", "kilometers per hour"),
+    (r"\bmph\b", "miles per hour"),
+    (r"\bm/s\b", "meters per second"),
+    (r"\b(\d{1,2}):00\b", r"\1"),  # 12:00 PM -> 12 PM
+    (r"\b1/2\b", "a half"), (r"\b1/3\b", "a third"), (r"\b1/4\b", "a quarter"), (r"\b3/4\b", "three quarters"),
+    (r"\s&\s", " and "),
+    (r"(?<=[a-z])-(?=[a-z])", " "),  # Wi-Fi (sometimes said as "why")
+)]
+_MONEY = re.compile(r"([$€£])(\d+(?:,\d{3})*)(?:\.(\d+))?(?:\s*(thousand|million|billion|trillion)\b)?", re.I)
+
+
 def clean_for_speech(s: str) -> str:
     s = re.sub(r"```.*?```", " ", s, flags=re.S)
     s = re.sub(r"^\s*(?:[-*+•]|\d+[.)])\s+", "", s, flags=re.M)
     s = re.sub(r"[*_#`>|~]+", "", s)
     s = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", s)
+    s = _MONEY.sub(_money, s)
+    for p, r in _SPEECH_SUBS:
+        s = p.sub(r, s)
     return re.sub(r"\s+", " ", s).strip()
 
 

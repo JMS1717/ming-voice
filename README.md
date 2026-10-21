@@ -12,6 +12,10 @@ typically starting to speak **~0.25 s after you stop talking**.
 * **Speculative turn-taking**: the reply starts generating during your pause and is discarded if you keep talking
 * **Resume after a pause**: if it starts answering and you carry on within a second, the answer is withdrawn,
   the conversation rolls back, and everything you said is answered as one turn
+* **Survives restarts**: the conversation is kept in `.conversation.json` after every turn; a server that
+  restarts within 30 minutes (`MING_RESUME_S`) carries on where it left off. New chat clears it.
+* **Speaks numbers and symbols properly**: "240 × 37", "−5°C", "24-17", "$1,299.99", "12 km/h" or "12:00 PM" are
+  rewritten into words the voice reads correctly (each was checked by speaking it and transcribing it back)
 * Barge-in: talk over the assistant to interrupt it, **even on a speakerphone**: the server recognises its own
   voice leaking back into the mic (echo-aware barge-in) and only stops for yours
 * Streaming speech output (audio starts after the first ~160 ms of speech are generated)
@@ -258,6 +262,7 @@ never disturb a live conversation. `dev/test_api.py` exercises every endpoint.
 | `MING_SUPERVISE` | `0` | `1` (`run.sh`; the Windows launcher sets it): restart the server when it crashes. |
 | `MING_ALARM_REPEATS` | `2` | How many more times a timer that went off is said when nobody answers (`0`: once only). |
 | `MING_ALARM_REPEAT_S` | `60` | Seconds between those repeats. |
+| `MING_RESUME_S` | `1800` | After a restart, carry on with a conversation saved less than this many seconds ago (`0`: always start afresh). |
 
 ## How it works
 
@@ -321,6 +326,8 @@ turn, now ~15 ms), graph-capturing every per-token step, and hiding model latenc
   (`BASE=https://<pc-ip>:8443 KEY=… python dev/test_api.py` from another machine)
 * `dev/test_encoder.sh`, `dev/profile_prefill.py` — audio encoder (trimmed chunks, flash attention) and prefill timing
 * `dev/tts_check.py`, `dev/test_clone.py`, `dev/test_takeover.py` — API checks
+* `dev/test_speech_text.py` — offline: symbols, money, ranges and units rewritten for the voice
+* `dev/test_routing.py` — spoken everyday questions: which tools each one uses (none for general knowledge)
 
 ## Credits & licenses
 

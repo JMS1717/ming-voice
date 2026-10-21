@@ -219,6 +219,7 @@ def _load():
         except Exception as e:
             log(f"could not load voice {f.name}: {e}")
     _warmup()
+    load_conversation(ENGINE["thinker"])
     # Start only after all graph captures (it must not launch kernels while a capture is running).
     # Without it, the first request after ~20 s of GPU idle stalls for minutes under WSL.
     GpuKeepAwake().start()
@@ -228,6 +229,36 @@ def _load():
         f"{torch.cuda.memory_reserved() / 2**30:.2f} GiB reserved, {free / 2**30:.2f} GiB free of {total / 2**30:.2f}")
     ENGINE["ready"] = True
     log("READY — open http://localhost:%s" % os.environ.get("PORT", "8000"))
+
+
+CONVERSATION_FILE = HERE / ".conversation.json"
+RESUME_S = float(os.environ.get("MING_RESUME_S", "1800"))
+
+
+def save_conversation(th: Thinker):
+    """Keep the conversation on disk after each turn, so a restart (a crash, an update) can pick it up again."""
+    try:
+        data = {"saved": time.time(), "system_prompt": th.system_prompt, "history": th.history[-100:]}
+        tmp = CONVERSATION_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, default=str))
+        tmp.replace(CONVERSATION_FILE)
+    except Exception as e:
+        log(f"could not save the conversation: {e}")
+
+
+def load_conversation(th: Thinker):
+    """Continue the conversation from before a restart, if it was saved less than RESUME_S ago (the first turn then
+    re-enters it as text, as after a context rollover). MING_RESUME_S=0: always start afresh."""
+    try:
+        data = json.loads(CONVERSATION_FILE.read_text())
+    except (OSError, ValueError):
+        return
+    age = time.time() - data.get("saved", 0)
+    if not data.get("history") or age > RESUME_S:
+        return
+    th.reset(data.get("system_prompt") or DEFAULT_SYSTEM_PROMPT)
+    th.history, th.rebuild = data["history"], True
+    log(f"continuing the conversation from {age / 60:.0f} min ago ({len(th.history)} turns)")
 
 
 def _warmup():
@@ -997,6 +1028,7 @@ class Session:
                 undo = r.undone and r.committed
             if undo:
                 th.restore(snap)
+            save_conversation(th)
 
     def _transcribe_user(self, r: Reply, th: Thinker):
         """Background ASR of the user's utterance (for the transcript and context rollover).
@@ -1173,6 +1205,7 @@ class Session:
                     with self.undo_lock:
                         self.pending_restore = None
                     th.reset(msg.get("system_prompt") or DEFAULT_SYSTEM_PROMPT)
+                    save_conversation(th)  # (an empty one: a restart starts afresh too)
             threading.Thread(target=do_reset, daemon=True).start()
             self.emit_json({"type": "reset_ok"})
         elif t == "stop":
