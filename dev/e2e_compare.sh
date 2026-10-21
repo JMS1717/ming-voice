@@ -2,7 +2,7 @@
 # Run the e2e test under several turn-taking configs: "spec_ms:smart_turn" pairs (default: new vs. old defaults)
 cd "$(dirname "$0")/.."
 cfgs=("$@")
-[ ${#cfgs[@]} -eq 0 ] && cfgs=(64:1 160:0)
+[ ${#cfgs[@]} -eq 0 ] && cfgs=(32:1 64:1)
 for cfg in "${cfgs[@]}"; do
   spec=${cfg%%:*}; smart=${cfg##*:}
   echo "== spec_ms $spec, smart turn $smart"

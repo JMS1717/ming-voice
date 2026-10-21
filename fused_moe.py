@@ -156,7 +156,8 @@ def _align_blocks(flat, E1, BM):
     Returns sorted pair ids (P = padding) and the expert of each BM block (-1 = unused)."""
     P = flat.numel()
     dev = flat.device
-    counts = torch.bincount(flat, minlength=E1)
+    # (not torch.bincount: on the GPU it reads min/max back to the host to size its output, a sync per call)
+    counts = torch.zeros(E1, dtype=torch.long, device=dev).scatter_add_(0, flat.long(), torch.ones_like(flat, dtype=torch.long))
     padded = (counts + BM - 1) // BM * BM
     pend = padded.cumsum(0)
     pstart = pend - padded

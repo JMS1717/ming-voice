@@ -41,7 +41,7 @@ def echo_at(timeline, t, n):
 async def run(gain, interrupt_at=None):
     async with websockets.connect(URL, max_size=2**24) as ws:
         await ws.recv()
-        await ws.send(json.dumps({"type": "config", "barge_in": True, "spec_ms": 64, "smart_turn": True,
+        await ws.send(json.dumps({"type": "config", "barge_in": True, "spec_ms": 32, "smart_turn": True,
                                   "echo_guard": os.environ.get("ECHO_GUARD", "1") == "1"}))
         await ws.send(json.dumps({"type": "reset"}))
         # playback timeline like the web client: audio is queued after what is playing and dropped on interrupt

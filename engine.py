@@ -530,6 +530,7 @@ class Thinker:
     def _build_cache(self):
         m = self.model.model
         self.n_layers = m.config.num_hidden_layers
+        self._kda_attn = [l.attention for l in m.layers[: self.n_layers] if hasattr(getattr(l, "attention", None), "mode")]
         layers = []
         for layer in m.layers[: self.n_layers]:
             a = layer.attention
@@ -734,6 +735,10 @@ class Thinker:
             amask = (ids == m.config.audio_token_id).unsqueeze(-1).expand_as(h)
             h = h.masked_scatter(amask, audio)
         T = ids.shape[1]
+        # KDA: the chunked kernels are a dozen small launches per layer; up to a few hundred tokens the single
+        # recurrent kernel is faster (first turn with the system prompt: 67 -> 56 ms to the first token)
+        for a in self._kda_attn:
+            a.mode = "fused_recurrent" if T <= 192 else "chunk"
         pos = torch.arange(self.cur_len, self.cur_len + T, device=DEVICE)
         self.cache.attn_len = self.cur_len + T
         logits = self._forward(h, pos)

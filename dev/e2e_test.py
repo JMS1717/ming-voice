@@ -66,7 +66,7 @@ async def main():
     retracts = [0]
     async with websockets.connect(f"ws://{URL}/ws", max_size=2**24) as ws:
         hello = json.loads(await ws.recv())
-        await ws.send(json.dumps({"type": "config", "voice": "US_Stella", "end_ms": 500, "spec_ms": int(os.environ.get("E2E_SPEC_MS", "64")),
+        await ws.send(json.dumps({"type": "config", "voice": "US_Stella", "end_ms": 500, "spec_ms": int(os.environ.get("E2E_SPEC_MS", "32")),
                                   "smart_turn": os.environ.get("E2E_SMART", "1") == "1",
                                   **({"fast_end_ms": int(os.environ["E2E_FAST_END"])} if "E2E_FAST_END" in os.environ else {}),
                                   "barge_in": True}))

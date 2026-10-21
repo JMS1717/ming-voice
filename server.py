@@ -378,7 +378,7 @@ class Session:
         self.voice = VOICES[0]
         self.barge_in = True
         self.end_ms = 500
-        self.spec_ms = 64  # start generating speculatively after this much silence (0 = off)
+        self.spec_ms = 32  # start generating speculatively after this much of a pause (0 = off)
         self.short_extra_ms = 250  # extra end-of-turn wait when the utterance is under 1 s of speech
         # Smart Turn: once the pause starts, a classifier judges from the audio whether the user has finished.
         # Confident "finished" ends the turn after fast_end_ms; "unfinished" stretches the wait to slow_end_ms.

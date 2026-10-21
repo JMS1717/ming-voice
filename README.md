@@ -27,7 +27,7 @@ Everything runs locally; no audio leaves the machine.
 
 | | |
 |---|---|
-| From the end of your speech to the first audio | ~0.29 s median, measured from the last audible sound of the question (the pause is timed from the drop in voice energy, ~0.25 s when Smart Turn is confident; the reply is generated during it) |
+| From the end of your speech to the first audio | ~0.25 s median, measured from the last audible sound of the question (the pause is timed from the drop in voice energy, ~0.25 s when Smart Turn is confident; the reply is generated during it and is ready when the pause ends) |
 | Thinker (audio LLM, 9.3B MoE / 2.7B active) | ~115 tokens/s decode; first token ~80 ms after a short spoken turn (~65 ms typed) |
 | Talker (speech synthesis) | ~0.3× real time end to end; 13 ms per 80 ms of audio for the core step |
 | Startup | ~30 s (first start after install: ~1–2 min to compile kernels) |
@@ -129,7 +129,7 @@ never disturb a live conversation. `dev/test_api.py` exercises every endpoint.
 | Smart turn detection | on | Ends the turn after 250 ms of silence when you've clearly finished, waits up to 1.5 s when you sound mid-sentence, and uses the end-of-turn pause otherwise. |
 | End-of-turn pause | 500 ms | Silence that ends your turn (when Smart Turn is off or unsure). Lower = snappier, but more likely to cut you off. |
 | Extra pause after short phrases | 250 ms | Added when you've said < 1 s ("Can you tell me…"), which is usually unfinished. |
-| Start thinking after | 64 ms | When speculative generation starts (it is discarded if you keep talking). |
+| Start thinking after | 32 ms | When speculative generation starts (it is discarded if you keep talking). |
 | Voice detection sensitivity | 0.50 | Silero VAD threshold. |
 | Playback buffer | 100 ms | Client jitter buffer. |
 
@@ -198,7 +198,7 @@ turn, now ~15 ms), graph-capturing every per-token step, and hiding model latenc
   handling, barge-in; transcribes the spoken replies (`dev/make_questions.py` regenerates its audio)
 * `dev/robustness.py` — long input, Chinese, noise-only, double barge-in
 * `dev/eval_steps.py` — speech quality (ASR round-trip WER) vs. diffusion steps (standalone, needs the GPU)
-* `dev/e2e_compare.sh 64:1 160:0` — e2e under several `spec_ms:smart_turn` settings
+* `dev/e2e_compare.sh 32:1 64:1` — e2e under several `spec_ms:smart_turn` settings
 * `dev/test_fast_tail.py`, `dev/test_fast_llm.py`, `dev/test_sensitivity.py` — fused paths vs. reference
 * `dev/test_moe_prefill.py` (`TUNE=1` to re-tune), `dev/test_prefill.py`, `dev/test_prefill_layer.py` — fused
   prefill MoE: accuracy vs. fp32, replies, time to first token

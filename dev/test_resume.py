@@ -29,7 +29,7 @@ async def converse(parts, cfg, listen_s=12):
     """parts: list of (audio, gap_after_s). Streams them in real time; returns the events."""
     async with websockets.connect(URL, max_size=2**24) as ws:
         await ws.recv()
-        await ws.send(json.dumps({"type": "config", "barge_in": True, "spec_ms": 64, "smart_turn": True, **cfg}))
+        await ws.send(json.dumps({"type": "config", "barge_in": True, "spec_ms": 32, "smart_turn": True, **cfg}))
         await ws.send(json.dumps({"type": "reset"}))
         await asyncio.sleep(0.3)
         ev = []
