@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# One-step installer for Ming Voice inside WSL2 Ubuntu 24.04 (AMD GPU). Safe to run again: done steps are skipped.
-#   bash install.sh             ROCm (asks for your Linux password), Python env, model, Desktop shortcut
+# One-step installer for Ming Voice inside WSL2 Ubuntu 24.04 (AMD GPU; NVIDIA experimental). Safe to run again:
+# done steps are skipped.
+#   bash install.sh             ROCm on AMD (asks for your Linux password), Python env, model, Desktop shortcut
 #   bash install.sh --no-rocm   skip the ROCm step (you installed it yourself)
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -9,7 +10,7 @@ die() { printf '\n\033[1;31mError: %s\033[0m\n' "$*" >&2; exit 1; }
 NO_ROCM=0; [ "${1:-}" = --no-rocm ] && NO_ROCM=1
 
 # ---- checks
-[ -e /dev/dxg ] || die "no GPU bridge (/dev/dxg). Run this inside WSL2 on Windows 11 with a recent AMD Adrenalin driver."
+[ -e /dev/dxg ] || die "no GPU bridge (/dev/dxg). Run this inside WSL2 on Windows 11 with a recent AMD Adrenalin or NVIDIA driver."
 . /etc/os-release
 [ "${VERSION_ID:-}" = 24.04 ] || echo "Warning: Ming Voice is tested on Ubuntu 24.04; this is ${PRETTY_NAME:-unknown}."
 free_gb=$(df -BG --output=avail . | tail -1 | tr -dc 0-9)
@@ -26,7 +27,13 @@ fi
 # ---- ROCm + WSL GPU bridge
 RESTART=0
 gpu() { HSA_ENABLE_DXG_DETECTION=1 /opt/rocm/bin/rocminfo 2>/dev/null | grep -m1 -oE 'gfx1[0-9a-f]+' || true; }
-if [ -n "$(gpu)" ]; then
+nv() { nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1 || true; }
+if [ -z "${MING_GPU:-}" ] && [ -n "$(nv)" ]; then
+  export MING_GPU=nvidia
+  say "NVIDIA GPU found ($(nv)): using CUDA PyTorch, no ROCm needed. NVIDIA support is new and less tested than AMD."
+elif [ "${MING_GPU:-}" = nvidia ]; then
+  say "Skipping ROCm (MING_GPU=nvidia)"
+elif [ -n "$(gpu)" ]; then
   say "ROCm is ready ($(gpu))"
 elif [ $NO_ROCM = 1 ]; then
   say "Skipping ROCm (--no-rocm)"

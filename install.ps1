@@ -1,5 +1,5 @@
 # Ming Voice installer for Windows 11: sets up WSL2 + Ubuntu 24.04 if needed, gets the code into Ubuntu and runs
-# install.sh there (ROCm, Python env, model, Desktop shortcut). Safe to run again.
+# install.sh there (ROCm on AMD, Python env, model, Desktop shortcut). Safe to run again.
 #   irm https://raw.githubusercontent.com/JMS1717/ming-voice/main/install.ps1 | iex
 # or double-click Install.cmd in a downloaded copy.
 function Install-MingVoice {
@@ -7,8 +7,8 @@ function Install-MingVoice {
     function Say($t) { Write-Host "`n==> $t" -ForegroundColor Cyan }
 
     $gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name })
-    if (-not ($gpus -match 'Radeon|AMD')) {
-        Write-Warning "No AMD Radeon GPU found ($($gpus -join ', ')). Ming Voice needs an AMD GPU with 16 GB+ VRAM."
+    if (-not ($gpus -match 'Radeon|AMD|NVIDIA')) {
+        Write-Warning "No AMD or NVIDIA GPU found ($($gpus -join ', ')). Ming Voice needs a GPU with 16 GB+ VRAM."
         if ((Read-Host 'Continue anyway? (y/N)') -ne 'y') { return }
     }
 

@@ -2,7 +2,7 @@
 
 # Ming Voice
 
-**A fully local, real-time voice assistant for AMD Radeon GPUs.**<br>
+**A fully local, real-time voice assistant for AMD Radeon GPUs (NVIDIA experimental).**<br>
 Talk to it and it answers out loud, usually starting **about a quarter of a second** after you stop talking.
 
 [![Release](https://img.shields.io/github/v/release/JMS1717/ming-voice?color=7f9cff)](https://github.com/JMS1717/ming-voice/releases)
@@ -78,12 +78,15 @@ Measured on a Radeon RX 7900 XTX (24 GB):
 ### Requirements
 
 - Windows 11 with **WSL2** and **Ubuntu 24.04**
-- An AMD GPU supported by ROCm on WSL with **16 GB+ VRAM** (tested on the RX 7900 XTX) and a recent Adrenalin driver with WSL support
+- A GPU with **16 GB+ VRAM**:
+  - **AMD** supported by ROCm on WSL (tested on the RX 7900 XTX), with a recent Adrenalin driver with WSL support
+  - **NVIDIA** RTX 30 series or newer (e.g. RTX 3090, 4060 Ti 16 GB, 4080, 4090, 5080, 5090), with a current Game
+    Ready or Studio driver. *Experimental:* the installer sets it up with CUDA PyTorch and the code is
+    vendor-neutral, but it hasn't been tested on NVIDIA hardware yet. Reports welcome!
 - ~30 GB free disk (20 GB model + Python environment)
 
-Native Linux with ROCm is untested, but should only need the WSL-specific parts removed
+Native Linux is untested, but should only need the WSL-specific parts removed
 (`HSA_ENABLE_DXG_DETECTION`, the `libhsa-runtime64` removal in `setup_env.sh`, `scripts/install_rocm_wsl.sh`).
-NVIDIA GPUs are not targeted.
 
 ### Install
 
@@ -93,9 +96,9 @@ Open **PowerShell** on Windows and paste:
 irm https://raw.githubusercontent.com/JMS1717/ming-voice/main/install.ps1 | iex
 ```
 
-That's it. It sets up WSL and Ubuntu 24.04 if you don't have them yet, then installs ROCm, the Python
-environment and the model (~20 GB download), and puts a **Ming Voice** shortcut on your Desktop. It asks for your
-Linux password once (for ROCm). If anything stops halfway, run it again: finished steps are skipped.
+That's it. It sets up WSL and Ubuntu 24.04 if you don't have them yet, then installs ROCm (AMD only), the Python
+environment and the model (~20 GB download), and puts a **Ming Voice** shortcut on your Desktop. On AMD it asks for
+your Linux password once (for ROCm). If anything stops halfway, run it again: finished steps are skipped.
 (Prefer not to paste commands? Download the repo and double-click `Install.cmd`.)
 
 Already in a WSL Ubuntu shell? Same thing from there:
@@ -109,8 +112,8 @@ bash ~/ming-voice/install.sh
 <summary>What the installer runs (manual install)</summary>
 
 ```bash
-sudo bash scripts/install_rocm_wsl.sh      # ROCm 7.2.4 + librocdxg (WSL GPU bridge); restart WSL afterwards (wsl --shutdown)
-bash setup_env.sh                          # Python env (ROCm PyTorch wheels, needs uv) + model download (~20 GB)
+sudo bash scripts/install_rocm_wsl.sh      # AMD only: ROCm 7.2.4 + librocdxg (WSL GPU bridge); then wsl --shutdown
+bash setup_env.sh                          # Python env (ROCm or CUDA PyTorch, needs uv) + model download (~20 GB)
 ```
 
 </details>
