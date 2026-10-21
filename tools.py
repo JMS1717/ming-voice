@@ -316,7 +316,10 @@ def reminder_text(message: str) -> tuple[str, str]:
     m = re.sub(r"\s+", " ", (message or "").strip().rstrip(".!")).strip()
     verb = re.match(r"(?:(?:please )?remind (?:me|the user|him|her|them) (?:to|that)|reminder(?: to|:)|to) (.+)", m, re.I)
     label = verb.group(1).strip() if verb else m
-    content = set(re.findall(r"[a-z]+", _words_to_digits(label.lower()))) - {
+    already = re.match(r"(?:it'?s )?time to (.+)", label, re.I)  # ('Reminder: time to stretch': not "Time to time to")
+    if already:
+        label, verb = already.group(1).strip(), already
+    content =set(re.findall(r"[a-z]+", _words_to_digits(label.lower()))) - {
         "a", "an", "the", "my", "your", "timer", "reminder", "is", "set", "for", "minute", "minutes", "second",
         "seconds", "hour", "hours", "in", "and", "half", "done", "up", "time", "s"}
     if not content:

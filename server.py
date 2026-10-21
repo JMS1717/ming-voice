@@ -637,6 +637,9 @@ class Session:
         """No answer since the alarm was said: say it again (event loop)."""
         if RINGING.get("said_at") != said_at:  # answered, or a newer alarm took over
             return
+        if ACTIVE.get("sess") is not self:  # whoever heard it has gone (a test, a closed tab): don't follow them
+            RINGING.clear()
+            return
         if self._busy() or self.in_speech:  # (talking, or the user may be answering right now)
             self.loop.call_later(2.0, self._alarm_again, said_at)
             return

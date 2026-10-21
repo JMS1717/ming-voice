@@ -56,7 +56,9 @@ check(parse_when("whenever", now) is None, "parse_when rejects nonsense")
 check(spoken_duration(5400) == "1 hour and 30 minutes", "spoken duration")
 from tools import reminder_text  # noqa: E402
 for msg, want in (("Remind me to stretch", ("stretch", "Time to stretch.")), ("A 10-minute timer is set.", ("", "")),
-                  ("pasta", ("pasta", "Reminder: pasta.")), ("", ("", "")), ("timer for 5 minutes", ("", ""))):
+                  ("pasta", ("pasta", "Reminder: pasta.")), ("", ("", "")), ("timer for 5 minutes", ("", "")),
+                  ("Reminder: time to stretch", ("stretch", "Time to stretch.")),
+                  ("Time to take the bread out", ("take the bread out", "Time to take the bread out."))):
     check(reminder_text(msg) == want, f"reminder_text {msg!r} -> {want} (got {reminder_text(msg)})")
 tb = Toolbox()
 tb.timers.path = tb.timers.path.with_name(".timers.test.json")  # (don't touch real timers)
