@@ -53,6 +53,7 @@ CANT_LOOK_UP = re.compile(r"\b((live|real[- ]time|current|up[- ]to[- ]date|recen
                           r"a search engine|search(ing)? the (web|internet)|brows(e|ing)( the (web|internet))?|"
                           r"look (things|that|it) up|weather (data|forecasts?|information|updates)|"
                           r"a (weather )?forecast)\b", re.I)
+DIRECT_MAX_S = 8  # utterances up to this long are checked for a plain device command (Toolbox.direct)
 # ... and that dodge a music request instead of calling home_assistant ("What song would you like me to skip?")
 MUSIC_DODGE_START = re.compile(r"(what|which) (song|track|music|speaker)\b", re.I)
 MUSIC_DODGE = re.compile(r"\b(what|which) (song|track|music|speaker)\b|\bnothing (is )?(currently )?playing\b|"
@@ -893,8 +894,9 @@ class Thinker:
         sp = self.system_prompt.rstrip()
         tools = ""
         if self.tools is not None:
-            from tools import system_tools_block, tool_guidance
-            tools = tool_guidance(self.tools.home) + "\n" + system_tools_block(self.tools.specs)
+            from tools import system_tools_block, tool_examples, tool_guidance
+            tools = (tool_guidance(self.tools.home) + "\n" + system_tools_block(self.tools.specs)
+                     + tool_examples(self.tools.specs))
         return f"<role>SYSTEM</role>{sp}\n{tools}detailed thinking off{ROLE_END}"
 
     def set_tools(self, tools):
@@ -1077,6 +1079,12 @@ class Thinker:
                             head = full.strip()
                             if len(head.split()) >= 4 or SENTENCE_END.search(full):
                                 music = "home_assistant" in tool_names
+                                # A plain device command ("turn off the bedroom lights") answered without the tool:
+                                # what the user said decides (a short utterance: transcribing it takes ~0.1 s).
+                                if music and (wav0 is None or len(wav0) <= DIRECT_MAX_S * 16000) \
+                                        and hasattr(self.tools, "direct") and self.tools.direct(said()):
+                                    held, retry = False, "home_assistant"
+                                    break
                                 if not (REFUSAL_START.match(head) or music and MUSIC_DODGE_START.match(head)) \
                                         or len(head.split()) > 30:
                                     held = False
@@ -1207,7 +1215,8 @@ class Thinker:
                     log(f"reply said goodbye ({emitted!r}) without end_conversation: ending it")
                     yield {"type": "tool_result", "name": "end_conversation", "args": {}, "end": True}
             if used_tools and not emitted.strip() and not cancel.is_set():  # tools led nowhere: don't go silent
-                sorry = "Sorry, I couldn't get that done."
+                sorry = ("My apologies, sir. I couldn't manage that." if getattr(self.tools, "persona", "") == "jarvis"
+                         else "Sorry, I couldn't get that done.")
                 gen += self.tok(sorry, add_special_tokens=False).input_ids
                 yield sorry
         finally:

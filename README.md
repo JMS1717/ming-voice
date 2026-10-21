@@ -39,7 +39,11 @@ Brave Search, and Open-Meteo); turn tools off in Settings to stay fully offline.
 - **Home Assistant**: lights and plugs (on/off, brightness, "dimmer", colours, warm white), music and TVs (pause, skip,
   volume, "what's playing?"), thermostat, locks, the car (climate, temperature, defrost), the vacuum, scripts and scenes
   by name. Follow-ups work ("now turn it off", "and the living room too"), and the user's own words are used, not the
-  model's rewording. Also **Jellyfin**, and hand-off to a **Hermes Agent** for bigger jobs
+  model's rewording. Clear commands skip straight to Home Assistant. **Two at once** ("turn off the desk lamp and lock
+  the car"), **for later** ("turn off the lights in 20 minutes", "start the vacuum at 9 am"), and **rooms**: pick the
+  room the device is in, and "turn off the lights" means that room's. "Play some jazz on the kitchen speaker" works
+  with [Music Assistant](https://music-assistant.io/) installed. **Heads-ups**: a lock or garage door left open at
+  night, the vacuum stuck or finished. Also **Jellyfin**, and hand-off to a **Hermes Agent** for bigger jobs
 - Risky actions (unlocking, opening the garage) are **confirmed first**
 - **Jarvis mode**: a dry-witted British robot butler ("Certainly, sir.") with its own designed voice and wake word
 - Say **"that's all, bye"** and it ends the conversation (in wake-word mode it goes back to sleep)
@@ -319,6 +323,8 @@ conversation.
 | `MING_CONFIRM_RISKY` | `1` | Ask before unlocking, opening the garage or gate, or disarming an alarm |
 | `MING_HA_DIRECT` | `1` | Home Assistant: control every device the token can see (`0` = only through Assist, i.e. entities exposed to voice assistants) |
 | `MING_HA_EVENTS` | `1` | Say Home Assistant `ming_announce` events (needs `.ha_token`) |
+| `MING_HA_ALERTS` | `1` | Heads-ups: a lock or garage/door left open at night for 10 minutes, the vacuum stuck or finished |
+| `MING_ALERT_NIGHT` | `22-6` | The hours (start-end) when an unlocked lock or open door is worth a heads-up |
 | `MING_HERMES_AUTO` | `0` | `1`: hand Hermes anything Ming's own tools can't do, not only what you ask Hermes for by name |
 | `MING_SUPERVISE` | `0` | `1`: restart the server when it crashes (the Windows launcher sets it) |
 | `MING_ALARM_REPEATS` / `MING_ALARM_REPEAT_S` | `2` / `60` | How many more times a timer that went off is repeated, and how many seconds apart |
@@ -378,6 +384,7 @@ per-token step, and hiding model latency inside the end-of-turn pause.
 - `dev/e2e_test.py`: acts like a microphone over the WebSocket: latency, multi-turn memory, hesitation handling, barge-in (`dev/make_questions.py` regenerates its audio)
 - `dev/test_routing.py`: spoken everyday questions and which tools each one uses (none for general knowledge)
 - `dev/test_tools.py`: every tool, offline parts included (`--hermes` to include Hermes)
+- `dev/test_ha_model.py`: the real model against a made-up home: do spoken commands reach the right devices? (stop the server first)
 - `dev/test_speech_text.py`: offline: symbols, money, ranges and units rewritten for the voice
 - `dev/robustness.py`: long input, Chinese, noise only, double barge-in
 - `dev/test_resume.py`: pause mid-question until the reply starts, then continue: one answer to the whole question

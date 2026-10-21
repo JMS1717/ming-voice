@@ -85,6 +85,21 @@ def _delegate_done(task: str, ok, text: str):
 
 def _timer_fired(t: dict, late_s: float):
     from tools import spoken_duration
+    if t.get("ha"):  # "turn off the lights in 20 minutes": do it (quietly; only a failure is said)
+        if late_s > 900:
+            log(f"scheduled {t['ha']!r} skipped: {spoken_duration(late_s)} late")
+            return
+        from tools import home_assistant
+        try:
+            text, info = home_assistant(t["ha"], TOOLBOX.room)
+            log(f"scheduled {t['ha']!r}: {text}")
+            ok = not info.get("failed") and info.get("response_type") != "error"
+        except Exception as e:
+            log(f"scheduled {t['ha']!r} failed: {e!r}")
+            ok = False
+        if not ok:
+            announce(f"I couldn't {t['label']} as planned.", source="Scheduled action")
+        return
     say = t.get("say") or (f"Your timer for {spoken_duration(t['duration'])} is done." if t["duration"] else "Time's up.")
     if late_s > 90:
         say += f" That was {spoken_duration(late_s)} ago."
@@ -160,6 +175,28 @@ def _ha_events():
             log(f"Home Assistant events: {type(e).__name__}: {e}; reconnecting in {delay}s")
         time.sleep(delay)
         delay = min(delay * 2, 300)
+
+
+def _ha_watch(every_s: float = 60.0):
+    """Heads-ups from Home Assistant (ha.alerts): a lock or garage door left open at night, the vacuum stuck or done.
+    MING_HA_ALERTS=0 turns them off; MING_ALERT_NIGHT="22-6" is when "at night" is."""
+    import ha
+    from tools import _ha_url, ha_token, in_character
+    try:
+        start, end = (int(x) for x in os.environ.get("MING_ALERT_NIGHT", "22-6").split("-"))
+    except ValueError:
+        start, end = 22, 6
+    seen: dict = {}
+    first = True
+    while True:
+        try:
+            msgs = ha.alerts(ha.devices(_ha_url(), ha_token(), fresh=True), seen, night=(start, end))
+            for m in ([] if first else msgs):  # (what was already so at startup isn't news)
+                announce(in_character(m, TOOLBOX.persona), source="Home Assistant", ttl=1800)
+            first = False
+        except Exception as e:
+            log(f"Home Assistant heads-ups: {type(e).__name__}: {e}")
+        time.sleep(every_s)
 
 
 TOOLBOX.on_delegate_done = _delegate_done
@@ -319,6 +356,8 @@ async def lifespan(_app):
     from tools import ha_token
     if ha_token() and os.environ.get("MING_HA_EVENTS", "1") != "0":
         threading.Thread(target=_ha_events, daemon=True, name="ha-events").start()
+    if ha_token() and os.environ.get("MING_HA_ALERTS", "1") != "0":
+        threading.Thread(target=_ha_watch, daemon=True, name="ha-watch").start()
     yield
 
 
@@ -372,6 +411,19 @@ def health():
             "gpu_mem_gib": round(torch.cuda.memory_allocated() / 2**30, 2),
             "gpu_reserved_gib": round(torch.cuda.memory_reserved() / 2**30, 2),
             "gpu_free_gib": round(torch.cuda.mem_get_info()[0] / 2**30, 2)}
+
+
+@app.get("/api/ha/areas")
+def ha_areas():
+    """The Home Assistant areas that have devices (the client's "Room" setting)."""
+    from tools import HA_DIRECT, _ha_url, ha_token
+    if not (HA_DIRECT and ha_token()):
+        return {"areas": []}
+    try:
+        import ha
+        return {"areas": sorted({d["area"] for d in ha.devices(_ha_url(), ha_token()) if d["area"]})}
+    except Exception as e:
+        return JSONResponse({"areas": [], "error": f"{type(e).__name__}: {e}"}, status_code=502)
 
 
 @app.post("/api/announce")
@@ -577,6 +629,7 @@ class Session:
         self.tools = True  # let the model search the web, check the weather, calculate, tell the time
         self.home = ""  # the user's location, for "what's the weather?"
         self.persona = ""  # "jarvis": tool confirmations in the butler's words ("Certainly, sir. I've turned off...")
+        self.room = ""  # the Home Assistant area this device is in ("turn off the lights": that room's)
         self.end_ms = 500
         self.spec_ms = 32  # start generating speculatively after this much of a pause (0 = off)
         self.short_extra_ms = 250  # extra end-of-turn wait when the utterance is under 1 s of speech
@@ -1015,7 +1068,7 @@ class Session:
                 th.restore(pending)
             if r.cancel.is_set():
                 return
-            TOOLBOX.home, TOOLBOX.persona = self.home, self.persona
+            TOOLBOX.home, TOOLBOX.persona, TOOLBOX.room = self.home, self.persona, self.room
             th.set_tools(TOOLBOX if self.tools else None)  # (rebuilds the context when this changed)
             snap = r.snap = th.snapshot()
             try:
@@ -1177,6 +1230,8 @@ class Session:
                 self.home = str(msg["home"] or "").strip()[:100]
             if "persona" in msg:
                 self.persona = str(msg["persona"] or "")[:40]
+            if "room" in msg:
+                self.room = str(msg["room"] or "").strip()[:60]
             if "fast_end_ms" in msg:
                 self.fast_end_ms = int(max(100, min(1000, msg["fast_end_ms"])))
             if "threshold" in msg:

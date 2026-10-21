@@ -14,7 +14,9 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tools import Toolbox, calculate, parse_tool_calls  # noqa: E402
@@ -74,7 +76,7 @@ check(tb.run("timer", {"action": "cancel", "message": "all"})[0] == "Cancelled 1
 tb.timers.path.unlink(missing_ok=True)
 import tools  # noqa: E402  risky Home Assistant actions need a yes in a later turn
 sent = []
-tools.home_assistant = lambda command: (sent.append(command) or "Done.", {"targets": [command]})
+tools.home_assistant = lambda command, room="": (sent.append(command) or "Done.", {"targets": [command]})
 hb = Toolbox(specs=tools.SPECS + [tools.HA_SPEC])
 ha = lambda cmd, **kw: hb.run("home_assistant", {"command": cmd, **kw})
 hb.new_turn()
@@ -178,10 +180,63 @@ check(not called and r[0][1]["say"] == "Nothing is playing right now." and "noth
       f"no music: not every speaker in the house: {called} {r}")
 heard = "what's the temperature in the car?"  # the model's rewording vs what the user said
 check(hamod.pick("is the car locked?", heard, home) == heard and hamod.pick("turn on the den lights", "uh, yes", home)
-      == "turn on the den lights" and hamod.pick("turn off the lamp", "turn off the lamp and lock the car", home)
+      == "turn on the den lights" and hamod.pick("turn off the lamp", "turn off the lamp and tell me a joke", home)
       == "turn off the lamp", "pick: the user's own words when they're a command")
+both = "turn off the reading lamp and lock the car"
+check(hamod.pick("turn off the lamp", both, home) == both
+      and [(p["action"], [d["id"] for d in f]) for p, f, _ in hamod.split(both, home)]
+      == [("off", ["switch.reading_lamp"]), ("lock", ["lock.car_door"])], f"two commands: {hamod.split(both, home)}")
+p = hamod.parse("turn off the lights")
+p["room"] = "family room"
+check([d["id"] for d in hamod.resolve(home, p)[0]] == ["light.ceiling", "switch.reading_lamp", "switch.plug_1",
+                                                       "switch.tv_lights"], "the lights of the room the user is in")
+p = hamod.parse("turn off all the lights")
+p["room"] = "Den"
+check(len(hamod.resolve(home, p)[0]) == 6, "all the lights: the whole home, wherever the user is")
+for said, ok in (("hey Jarvis, turn off the den lights", True), ("lock the car and dim the ceiling light", True),
+                 ("please start the vacuum", True), ("tell me a story about a lamp", False),
+                 ("is the car locked?", False), ("set a timer for 10 minutes", False), ("stop", False),
+                 ("play some jazz", False), ("turn on the jacuzzi", False)):
+    check(hamod.confident(said, home) == ok, f"a plain device command? {said!r} -> {ok}")
+mass = home + hamod.build([st("media_player.den_speaker", "idle", "Den Speaker", mass_player_type="player")],
+                          [{"entity_id": "media_player.den_speaker", "area_id": "den"}], [],
+                          [{"area_id": "den", "name": "Den"}])
+p = hamod.parse("play some Miles Davis in the den")
+check(p["action"] == "play_media" and p["music"] == "miles davis"
+      and [d["id"] for d in hamod.resolve(mass, p)[0]] == ["media_player.den_speaker"]
+      and not hamod.resolve(home, hamod.parse("play some jazz"))[0], f"music by name (Music Assistant only): {p}")
 check(hamod.script_named("run movie night mode", home) and not hamod.script_named("play a movie", home),
       "a script by name isn't a film")
+night = time.mktime(dt.datetime(2026, 10, 21, 23, 0).timetuple())  # heads-ups: once, and only what's news
+seen, car = {}, [dict(byid["lock.car_door"], state="unlocked")]
+first = hamod.alerts(car, seen, now=night)
+later = hamod.alerts(car, seen, now=night + 700)
+again = hamod.alerts(car, seen, now=night + 1400)
+ns = {}  # (in the daytime, an unlocked door is nothing to mention)
+noon = hamod.alerts(car, ns, now=night - 11 * 3600) + hamod.alerts(car, ns, now=night - 11 * 3600 + 700)
+vac = [dict(byid["vacuum.robo"], state="cleaning")]
+vs = {}
+hamod.alerts(vac, vs, now=night)
+done = hamod.alerts([dict(vac[0], state="returning")], vs, now=night + 1200)
+docked = hamod.alerts([dict(vac[0], state="docked")], vs, now=night + 1300)
+check(not first and later == ["Heads up: the Car Door Lock is still unlocked."] and not again and not noon
+      and done == ["The Robo has finished cleaning."] and not docked, f"heads-ups: {first} {later} {again} {done} {docked}")
+lt = Toolbox(specs=tools.SPECS + [tools.HA_SPEC])  # device commands for later, and the wrong tool for one
+lt.timers = tools.Timers(path=Path(tempfile.mkdtemp()) / "timers.json")
+hamod._cache.update(t=time.time(), devices=home)
+lt.new_turn(lambda: "turn off the den lights in 20 minutes")
+r = lt.run("home_assistant", {"command": "turn off the den lights"})
+lt.new_turn(lambda: "warm up the car at 7 am")
+r2 = lt.run("timer", {"action": "set", "when": "7 am", "message": "warm up the car"})
+check(r[1].get("say") == "Okay, I'll turn off the den lights in 20 minutes."
+      and re.search(r"warm up the car (at|tomorrow at) 7 AM\.", r2[1].get("say", ""))
+      and [t.get("ha") for t in lt.timers.pending()] == ["turn off the den lights", "warm up the car"],
+      f"for later: {r} {r2} {lt.timers.pending()}")
+lt.new_turn(lambda: "unlock the car in 5 minutes")
+check("rather not" in lt.run("home_assistant", {"command": "unlock the car"})[1].get("say", ""), "risky: never on a timer")
+lt.new_turn(lambda: "turn on the reading lamp")
+lt.run("web_search", {"query": "reading lamp on"})
+check(sent[-1] == "turn on the reading lamp", f"a device command, not a search: {sent}")
 eb = Toolbox(specs=tools.SPECS)  # ending the conversation only when the user said goodbye
 for said, ok in (("okay thanks, bye", True), ("that's all for now", True), ("end the conversation", True),
                  ("goodnight ming", True), ("what's the weather tomorrow", False), ("stop", False)):
@@ -190,7 +245,7 @@ for said, ok in (("okay thanks, bye", True), ("that's all for now", True), ("end
     check(bool(r[1].get("end")) == ok, f"end_conversation for {said!r}: {r}")
 for say, want in (("Okay, turned off the lamp.", "Very good, sir. I've turned off the lamp."),  # the butler's words
                   ("The lamp is on. The fan is off.", "The lamp is on, sir. The fan is off."),
-                  ("Goodbye, sir.", "Goodbye, sir.")):
+                  ("Goodbye, sir.", "Goodbye, sir."), ("Okay, the car is locked.", "The car is secured, sir.")):
     check(tools.in_character(say, "jarvis") == want and tools.in_character(say, "") == say,
           f"jarvis: {say!r} -> {tools.in_character(say, 'jarvis')!r}")
 started = []  # Hermes only when the user says its name

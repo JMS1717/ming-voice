@@ -188,8 +188,22 @@ STATE_WORDS = {"unavailable": "offline", "heat": "heating", "cool": "cooling", "
 ON_STATES = {"on", "open", "opening", "playing", "unlocked", "cleaning", "heat", "cool", "heat_cool", "auto", "dry",
              "fan_only"}
 WAKE = re.compile(r"^((hey|hi|ok|okay) (ming|jarvis)\b[,.!]?\s*|(hey|hi) \w+[,.!]\s*)")
-# two commands in one breath ("turn off the lights and lock the car"): the model splits those, not pick()
+# two commands in one breath ("turn off the lights and lock the car"): split() runs them one by one
 MULTI = re.compile(r"\b(and|then|also)\b.*\b(turn|switch|set|lock|unlock|open|close|dim|start|stop|pause|play|make)\b")
+AND = re.compile(r"\b(and|then|also)\b")
+SPLIT = re.compile(r",?\s+\b(?:and then|and also|and|then|also)\b\s+")
+# music by name, through Music Assistant: "play (some) Miles Davis (on the kitchen speaker)" (not "play it again")
+PLAY_MUSIC = re.compile(r"(?:play|shuffle|listen to|put on(?= (?:some|my|a playlist|the (?:album|playlist))\b))\s+(?:some\s+|my\s+)?(?!(?:the\s+)?(?:music|it|again|that|"
+                        r"this)\b)(.+?)(?:\s+(?:on|in)\s+(?:the\s+)?([\w' ]+?))?$")
+# when a device command is for later: "... in 20 minutes", "... at 7 am", "... tomorrow at 6:30"
+DELAY = re.compile(r"\s*\b(?:in|after) (?:about )?(?:an?|one|half an|a couple of|a few|\d+(?:\.\d+)?|[a-z]+(?:[- ][a-z]+)?) "
+                      r"(?:and a half )?(?:hours?|minutes?|mins?|seconds?|secs?)\b(?: and (?:a half|\d+ minutes?))?|"
+                      r"\s*\b(?:(?:tomorrow|tonight|today) )?(?:at|by) (?:\d{1,2}(?::\d{2})?(?!\s*(?:%|percent|degrees?))"
+                      r"(?:\s*[ap]\.?m\.?)?|noon|midnight)\b(?: tomorrow| tonight)?", re.I)
+# what a clear device command starts with (after "hey Jarvis", "please", "could you"...): see confident()
+LEAD = re.compile(r"(turn|switch|shut|power|dim|brighten|set|make|lock|unlock|open|close|start|stop|pause|resume|"
+                  r"unpause|skip|next|previous|mute|unmute|toggle|kill|activate|warm|preheat|precondition|defrost|"
+                  r"vacuum|send|lights?|lamps?|volume|run|launch|trigger)\b")
 
 
 def parse(command: str) -> dict:
@@ -219,6 +233,11 @@ def parse(command: str) -> dict:
             step = 25
         else:
             value = 30.0 if re.search(r"\bdim\b", c) else 100.0
+    music = PLAY_MUSIC.match(c)  # "play some jazz in the kitchen" (Music Assistant)
+    if music and action in (None, "on", "play"):
+        action, c, music = "play_media", f"play {music.group(2) or ''}".strip(), music.group(1).strip()
+    else:
+        music = None
     color = COLOR_RE.search(c)
     if color and action in (None, "on", "brightness") and (lights or re.search(r"\b(make|turn|set|change|colou?r)\b", c)) \
             and not (color.group(1) in ("warm", "cool") or re.search(r"\b(car|vehicle|thermostat)\b", c)):
@@ -229,7 +248,7 @@ def parse(command: str) -> dict:
     if action == "color":
         target = COLOR_RE.sub(" ", target)
     target = re.sub(r"\s+", " ", VERBS.sub(" ", target)).strip()
-    return {"text": c, "action": action, "value": value, "step": step, "color": color and color.group(1),
+    return {"text": c, "action": action, "music": music, "value": value, "step": step, "color": color and color.group(1),
             "target": target, "full": full, "lights": lights, "follow": follow,
             "ref": bool(re.search(r"\b(it|them|they|those|these|that one|this one)\b", c)),
             "every": bool(re.search(r"\b(all|every|everything|whole house|anything)\b", c))}
@@ -286,6 +305,10 @@ def resolve(devs: list[dict], p: dict) -> tuple[list[dict], str]:
     area_name = next((d["area"] for d in devs if area and any(_norm(a) == area for a in d["area_names"])), "")
     rest = tw - set(area.split())
     pool = [d for d in devs if not area or any(_norm(a) == area for a in d["area_names"])]
+    here = set()  # the room the user is in (no room named, not "all"): "turn off the lights" means its lights
+    if not area and p.get("room") and not p["every"] and p["action"] != "status":
+        room = _norm(p["room"])
+        here = {d["id"] for d in devs if any(_norm(a) == room for a in d["area_names"])}
     if rest & CAR_WORDS:
         rest -= CAR_WORDS
         pool = [d for d in pool if d["car"]]
@@ -306,6 +329,15 @@ def resolve(devs: list[dict], p: dict) -> tuple[list[dict], str]:
         if not rest:
             return pool, area_name
     core = rest - LIGHT_WORDS
+    if p["action"] == "play_media":  # Music Assistant's players: the one named, else the room's, else one playing
+        mass = [d for d in pool if d["domain"] == "media_player" and "mass_player_type" in d["attrs"]]
+        if not mass:
+            return [], area_name
+        named = [d for d in mass if core and any(core <= _words(n) | {"speaker"} for n in d["names"])]
+        playing = [d for d in mass if d["state"] == "playing"]
+        pick_one = named or [d for d in mass if d["id"] in here] or (mass if area else []) or playing or mass
+        p["named"] = bool(named)
+        return pick_one[:1], area_name
     if p["action"] == "status" and not core and re.search(r"\b(playing|song|music|track|listening)\b", p["text"]):
         media = [d for d in pool if d["domain"] == "media_player"]  # "what's playing?", "what song is this?"
         return [d for d in media if d["state"] == "playing"] or media, area_name
@@ -317,6 +349,7 @@ def resolve(devs: list[dict], p: dict) -> tuple[list[dict], str]:
                 media = [d for d in media if d["kind"] == ("speaker" if "speaker" in core else "tv")]
             active = [d for d in media if d["state"] == "playing"] or (
                 [d for d in media if d["state"] == "paused"] if p["action"] == "play" else [])
+            active = [d for d in active if d["id"] in here] or active
             if p["action"] in ("next", "previous") and active:  # (once: a group and its speakers skip together)
                 active = [next((d for d in active if d["attrs"].get("media_title")), active[0])]
             p["named"] = bool(core)
@@ -345,6 +378,8 @@ def resolve(devs: list[dict], p: dict) -> tuple[list[dict], str]:
         if scored and scored[0][0] >= 0.65:
             top = scored[0][0]
             found = [d for s, d in scored if s >= top - 0.01]
+            if len(found) > 1:  # (two "Lamp"s: the one in this room)
+                found = [d for d in found if d["id"] in here] or found
             plural = {_norm(w) for w in re.findall(r"\b\w+s\b", t)} & core  # "the lamps": every lamp
             if plural:
                 every = [d for s, d in scored if s >= 0.7 and plural <= _words(" ".join(d["names"]))]
@@ -354,6 +389,10 @@ def resolve(devs: list[dict], p: dict) -> tuple[list[dict], str]:
     p["named"] = False
     if p["lights"]:
         lights = [d for d in pool if d["light"]]
+        if here and not area:
+            mine = [d for d in lights if d["id"] in here]
+            if mine:
+                lights, area_name = mine, mine[0]["area"]
         if "lamp" in rest:  # "the bedroom lamp": its lamps, if any are called that
             lamps = [d for d in lights if "lamp" in _words(" ".join(d["names"]))]
             p["named"], lights = bool(lamps), lamps or lights
@@ -365,10 +404,63 @@ def resolve(devs: list[dict], p: dict) -> tuple[list[dict], str]:
     return [], area_name
 
 
+def split(command: str, devs: list[dict], room: str = "") -> list[tuple[dict, list[dict], str]] | None:
+    """'turn off the lamp and lock the car' -> one (parsed, devices, area) per command, or None unless it is several
+    commands that each make sense. A part without a verb does what the one before it did ('turn off the lamp and
+    the fan'); 'it'/'them' is what the part before it was about ('turn on the lamp and set it to 40 percent')."""
+    if not AND.search(command.lower()):
+        return None
+    parts = [x for x in SPLIT.split(WAKE.sub("", command.lower().strip())) if x and x.strip()]
+    if len(parts) < 2:
+        return None
+    out = []
+    for part in parts:
+        p = parse(part)
+        p["room"] = room
+        prev = out[-1] if out else None
+        if p["action"] is None and prev is not None:
+            q = prev[0]
+            p.update(action=q["action"], value=p["value"] if p["value"] is not None else q["value"], step=q["step"],
+                     color=q["color"], lights=p["lights"] or q["lights"])
+        if p["action"] is None:
+            return None
+        if p["ref"] and prev is not None and not _words(p["target"]) - LIGHT_WORDS:
+            p["named"] = True
+            out.append((p, prev[1], prev[2]))
+            continue
+        found, area = resolve(devs, p)
+        if not found:
+            return None
+        out.append((p, found, area))
+    for i, (p, found, area) in enumerate(out[:-1]):  # "the kitchen and living room lights": the kitchen's lights
+        if not p["lights"] and not p.get("named") and any(q["lights"] for q, _, _ in out[i + 1:]):
+            p["lights"] = True
+            out[i] = (p, *resolve(devs, p))
+    return out if all(found for _, found, _ in out) else None
+
+
+def confident(text: str, devs: list[dict], room: str = "") -> bool:
+    """Is what the user said plainly a command for devices in the home ('turn off the bedroom lights', 'lock the car
+    and dim the lamp')? Then it goes to home_assistant whatever the model makes of it. Questions, chat, and anything
+    that only mentions a device ('tell me a story about a lamp') are not."""
+    text = DELAY.sub(" ", text)  # ("turn off the lights in 20 minutes": that's for later, but still a command)
+    p = parse(text)
+    if p["action"] in (None, "status") or not LEAD.match(p["text"]) or len(p["text"].split()) > 14:
+        return False
+    if AND.search(p["text"]) and split(text, devs, room):
+        return True
+    p["room"] = room
+    return bool(resolve(devs, follow_up(p))[0])
+
+
 def pick(command: str, heard: str, devs: list[dict]) -> str:
-    """The command to carry out: what the user said, when that is one command this module understands (the model's
+    """The command to carry out: what the user said, when that is a command this module understands (the model's
     rewording is often wrong), else the model's."""
-    if not heard or MULTI.search(heard.lower()) or heard.strip().lower() == command.strip().lower():
+    if not heard or heard.strip().lower() == command.strip().lower():
+        return command
+    if split(heard, devs):
+        return heard
+    if AND.search(heard.lower()):  # (two requests, not both for the home: the model's part for it)
         return command
     p = follow_up(parse(heard))
     if p["action"] is None:
@@ -541,14 +633,43 @@ def act(base: str, token: str, found: list[dict], p: dict) -> tuple[str, dict]:
     return text, {"say": say.strip(), "targets": [d["id"] for d in found], "failed": gone + cant}
 
 
-def handle(command: str, base: str, token: str) -> tuple[str, dict] | None:
-    """Do or answer `command` from the device list; None when it isn't understood (-> Assist)."""
+def handle(command: str, base: str, token: str, room: str = "") -> tuple[str, dict] | None:
+    """Do or answer `command` from the device list; None when it isn't understood (-> Assist). room: where the user
+    is (an HA area), for "turn off the lights" without a room."""
+    devs = devices(base, token, max_age=STATE_S)
+    several = split(command, devs, room)
+    if several:
+        texts, says, info = [], [], {"targets": [], "failed": []}
+        for p, found, area in several:
+            text, i = _one(base, token, p, found, area)
+            say = i.get("say", "")
+            texts.append(text)
+            says.append(re.sub(r"^Okay, (\w)", lambda m: m.group(1).upper(), say) if says else say)
+            info["targets"] += i.get("targets", [])
+            info["failed"] += i.get("failed", [])
+        return " ".join(texts), dict(info, say=" ".join(s for s in says if s))
     p = follow_up(parse(command))
     if p["action"] is None:
         return None
-    found, area = resolve(devices(base, token, max_age=STATE_S), p)
+    p["room"] = room
+    found, area = resolve(devs, p)
     if not found:
         return None
+    return _one(base, token, p, found, area)
+
+
+def _one(base: str, token: str, p: dict, found: list[dict], area: str) -> tuple[str, dict]:
+    if p["action"] == "play_media":
+        what = re.sub(r"^(the|a|an)\s+", "", p["music"] or "")
+        data = {"entity_id": [d["id"] for d in found], "media_id": what}
+        kind = re.search(r"\b(playlist|album|artist|radio)\b", what)
+        if kind:
+            data["media_type"] = kind.group(1)
+            data["media_id"] = re.sub(r"\s*\b(playlist|album|artist|radio)\b\s*", " ", what).strip() or what
+        call_service(base, token, "music_assistant", "play_media", data)
+        _last.update(ids=data["entity_id"], action="play", value=None, step=None, color=None, lights=False, t=time.time())
+        say = f"Okay, playing {what} on the {found[0]['say']}."
+        return f"Playing {what!r} on {found[0]['say']}.", {"say": say, "targets": data["entity_id"]}
     _last.update(ids=[d["id"] for d in found], action=p["action"], value=p["value"], step=p["step"],
                  color=p["color"], lights=p["lights"], t=time.time())
     if p["action"] == "status":
@@ -557,6 +678,46 @@ def handle(command: str, base: str, token: str) -> tuple[str, dict] | None:
         found = [d for d in found if _service(d, p)[0] or d["state"] == "unavailable"] or found
     _cache["t"] = 0.0  # (states change)
     return act(base, token, found, p)
+
+
+# --------------------------------------------------------------------------- heads-ups
+
+ALERT_AFTER_S = 600  # a lock or garage door has to be left like that this long (at night) before it's mentioned
+CLEANED_S = 300  # the vacuum has to have been cleaning this long for "it's finished" to be news
+
+
+def _night(t: float, night: tuple[int, int]) -> bool:
+    h = time.localtime(t).tm_hour
+    start, end = night
+    return h >= start or h < end if start > end else start <= h < end
+
+
+def alerts(devs: list[dict], seen: dict, now: float | None = None, night: tuple[int, int] = (22, 6)) -> list[str]:
+    """What's worth telling the user unasked, from one look at the devices (seen: kept between calls): a lock or a
+    garage door left open at night, the vacuum stuck or done. Each is said once (again only after it changed)."""
+    now = time.time() if now is None else now
+    out = []
+    for d in devs:
+        st, prev = d["state"], seen.get(d["id"])
+        if prev is None or prev["state"] != st:
+            seen[d["id"]] = prev = {"state": st, "since": now, "said": False, "was": prev and prev["state"],
+                                    "was_since": prev and prev["since"]}
+        if prev["said"]:
+            continue
+        msg = ""
+        garage = d["domain"] == "cover" and d["attrs"].get("device_class") in ("garage", "door", "gate")
+        if ((d["domain"] == "lock" and st == "unlocked") or (garage and st == "open")) and _night(now, night) \
+                and now - prev["since"] >= ALERT_AFTER_S:
+            msg = f"Heads up: the {d['say']} {_is([d['say']])} still {'unlocked' if st == 'unlocked' else 'open'}."
+        elif d["domain"] == "vacuum" and st == "error":
+            msg = f"The {d['say']} is stuck and needs a hand."
+        elif d["domain"] == "vacuum" and st in ("returning", "docked") and prev["was"] == "cleaning" \
+                and prev["since"] - (prev["was_since"] or prev["since"]) >= CLEANED_S and now - prev["since"] < 120:
+            msg = f"The {d['say']} has finished cleaning."  # (cleaning -> returning -> docked: said once)
+        if msg:
+            prev["said"] = True
+            out.append(msg)
+    return out
 
 
 def names_by_area(devs: list[dict], limit: int = 600) -> str:

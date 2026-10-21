@@ -95,6 +95,7 @@
   aside { border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; padding: 6px 16px 24px; }
   aside h3 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .7px; color: var(--muted); margin: 18px 0 10px; font-weight: 650; }
   .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+  .field[hidden] { display: none; }
   .field > span { font-size: 12.5px; color: var(--muted); display: flex; justify-content: space-between; }
   .field > span b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
   select, textarea, aside input[type=text] { width: 100%; padding: 7px 9px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); }
@@ -263,6 +264,7 @@
       <label class="check" title="The server compares what the microphone hears with what it just played, so the assistant's own voice coming out of a speaker doesn't count as you talking. Turn off only if it ignores you when you talk over it."><input type="checkbox" id="echo" checked> Ignore the assistant's own voice (speakerphone echo)</label>
       <label class="check" title="The assistant can search the web (DuckDuckGo), check the weather (Open-Meteo), calculate and tell the time. Only the search terms leave this computer, never your voice."><input type="checkbox" id="tools" checked> Web search &amp; tools (weather, timers, calculator, smart home)</label>
       <div class="field"><span>Your location (for the weather)</span><input id="home" type="text" placeholder="e.g. Paris, France" autocomplete="off"></div>
+      <div class="field" id="roomField" hidden title="The Home Assistant room this device is in: &quot;turn off the lights&quot; then means this room's lights (&quot;all the lights&quot; is still the whole home)."><span>This device is in (smart home)</span><select id="room"><option value="">No particular room</option></select></div>
 
       <h3>Timing</h3>
       <label class="check" title="A small model listens to how you said it (words and intonation) and answers sooner when you've clearly finished, or waits longer (up to 1.5 s) when you sound mid-sentence."><input type="checkbox" id="smart" checked> Smart turn detection</label>
@@ -379,6 +381,19 @@ for (const id of ['barge', 'echo', 'smart', 'tools', 'aec', 'ns', 'agc']) {
 $('home').value = store.get('home', '');
 $('home').addEventListener('change', () => { store.set('home', $('home').value.trim()); sendCfg(); });
 $('voice').addEventListener('change', () => { store.set('voice', $('voice').value); sendCfg(); });
+$('room').addEventListener('change', () => { store.set('room', $('room').value); sendCfg(); });
+async function loadRooms() {  // the Home Assistant areas (the field stays hidden without Home Assistant)
+  try {
+    const j = await (await fetch('/api/ha/areas')).json();
+    if (!j.areas || !j.areas.length) return;
+    const saved = store.get('room', '');
+    for (const a of j.areas) { const o = document.createElement('option'); o.value = o.textContent = a; $('room').appendChild(o); }
+    $('room').value = j.areas.includes(saved) ? saved : '';
+    $('roomField').hidden = false;
+    sendCfg();
+  } catch (e) {}
+}
+loadRooms();
 function applyVol() { if (outGain) outGain.gain.value = $('vol').value / 100; }
 function setMode(m) {
   mode = m; store.set('mode', m);
@@ -403,7 +418,7 @@ function chime(notes, gap = 0.13, vol = 0.18) {  // short sine tones: woken up (
 $('modeSeg').addEventListener('click', (e) => { if (e.target.dataset.mode) setMode(e.target.dataset.mode); });
 function sendCfg() {
   if (!ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({ type: 'config', voice: $('voice').value, barge_in: $('barge').checked, echo_guard: $('echo').checked, smart_turn: $('smart').checked, tools: $('tools').checked, home: $('home').value.trim(), mode, wake_word: wakeName(), persona: PERSONA[$('preset').value] ? $('preset').value : '',
+  ws.send(JSON.stringify({ type: 'config', voice: $('voice').value, barge_in: $('barge').checked, echo_guard: $('echo').checked, smart_turn: $('smart').checked, tools: $('tools').checked, home: $('home').value.trim(), room: $('room').value || store.get('room', ''), mode, wake_word: wakeName(), persona: PERSONA[$('preset').value] ? $('preset').value : '',
     end_ms: +$('end').value, short_extra_ms: +$('short').value, spec_ms: +$('spec').value, resume_ms: +$('resume').value, threshold: +$('th').value }));
 }
 $('preset').value = store.get('preset', 'assistant');

@@ -341,6 +341,12 @@ def spoken_time(t: _dt.datetime, now: _dt.datetime | None = None) -> str:
     return clock if days == 0 else f"tomorrow at {clock}" if days == 1 else f"{t.strftime('%A')} at {clock}"
 
 
+def spoken_at(t: _dt.datetime, now: _dt.datetime | None = None) -> str:
+    """'at 7 PM', 'tomorrow at 7 AM' (not 'at tomorrow at 7 AM')"""
+    s = spoken_time(t, now)
+    return s if " at " in s else f"at {s}"
+
+
 class Timers:
     """Timers and reminders, kept in .timers.json so they survive a restart. After start(on_fire), on_fire(entry,
     late_s) is called from a background thread when one goes off (also for ones that went off while the server was
@@ -364,10 +370,13 @@ class Timers:
         except OSError:
             pass
 
-    def add(self, due: float, label: str, duration: float | None, say: str = "") -> dict:
+    def add(self, due: float, label: str, duration: float | None, say: str = "", ha: str = "") -> dict:
+        """ha: a Home Assistant command to carry out when it's due ("turn off the lights in 20 minutes"), not say"""
         with self.cv:
             t = {"id": max([int(time.time() * 1000)] + [x["id"] + 1 for x in self.items]),  # (unique, and newest last)
                  "due": due, "label": label, "duration": duration, "say": say}
+            if ha:
+                t["ha"] = ha
             self.items.append(t)
             self.items.sort(key=lambda x: x["due"])
             self._save()
@@ -430,9 +439,10 @@ def ha_token() -> str:
 HA_DIRECT = os.environ.get("MING_HA_DIRECT", "1") == "1"
 
 
-def home_assistant(command: str) -> tuple[str, dict]:
+def home_assistant(command: str, room: str = "") -> tuple[str, dict]:
     """Do a spoken-style command or answer a question about the user's devices: directly from HA's device list
-    (ha.py: lights, plugs, locks, thermostat, ...), else through HA's own intent handling (Assist)."""
+    (ha.py: lights, plugs, locks, thermostat, ...), else through HA's own intent handling (Assist). room: the HA
+    area the user is in ("turn off the lights" means its lights)."""
     command = (command or "").strip()
     if not command:
         return "Error: empty command.", {}
@@ -440,7 +450,7 @@ def home_assistant(command: str) -> tuple[str, dict]:
         return assist(command)
     import ha
     try:
-        done = ha.handle(command, _ha_url(), ha_token())
+        done = ha.handle(command, _ha_url(), ha_token(), room=room)
     except Exception as e:  # (the websocket API unreachable, ...: Assist may still manage)
         print(f"home_assistant: direct control failed ({e!r}); trying Assist", flush=True)
         done = None
@@ -852,7 +862,8 @@ GOODBYES = ["Okay, bye!", "Bye for now!", "Talk to you later!", "Okay, see you l
 # The butler persona (Jarvis preset): what the tools say themselves, in character
 BUTLER_GOODBYES = ["Very good, sir. I'll be here if you need me.", "As you wish, sir. Until next time.",
                    "Of course, sir. Do call if anything comes up.", "Very good, sir. I shall keep an eye on things."]
-BUTLER_OPENERS = ["Very good, sir.", "Right away, sir.", "Certainly, sir.", "Done, sir.", "Of course, sir."]
+BUTLER_OPENERS = ["Very good, sir.", "Right away, sir.", "Certainly, sir.", "Done, sir.", "Of course, sir.",
+                  "As you wish, sir.", "At once, sir."]
 
 
 def in_character(say: str, persona: str, n: int = 0) -> str:
@@ -861,6 +872,9 @@ def in_character(say: str, persona: str, n: int = 0) -> str:
         return say
     if say.startswith("Just to be sure: do you want me to "):
         return "Just to confirm, sir: shall I " + say[len("Just to be sure: do you want me to "):]
+    locked = re.match(r"okay, (the .+) (is|are) locked\.(.*)", say, re.I | re.S)
+    if locked:  # 'Okay, the car is locked.' -> 'The car is secured, sir.'
+        return f"{locked.group(1)[:1].upper()}{locked.group(1)[1:]} {locked.group(2)} secured, sir.{locked.group(3)}"
     m = re.match(r"(okay|ok|alright|sure)[,.!]?\s+", say, re.I)
     if not m:  # a status: 'The lamp is on, sir.'
         return say if re.search(r"\bsir\b", say, re.I) else re.sub(r"\.(\s|$)", r", sir.\1", say, count=1)
@@ -907,6 +921,7 @@ class Toolbox:
         self._confirm = None  # (command, turn, time) of a risky action waiting for the user's yes
         self.heard = None  # () -> what the user said this turn (transcribed on first use; Thinker.stream sets it)
         self.persona = ""  # "jarvis": what the tools say is said in character (in_character)
+        self.room = ""  # the Home Assistant area the user is in (the client's setting)
 
     def new_turn(self, heard=None):
         self.turn += 1
@@ -929,6 +944,10 @@ class Toolbox:
         if impl is None:
             return f"Error: there is no tool named {name!r}.", {"error": "unknown tool"}
         args = {k: v for k, v in (args or {}).items() if isinstance(k, str)}
+        if name not in ("home_assistant", "end_conversation", "lists", "memory") and self.heard is not None \
+                and self.direct(self.heard() or "") and not (name == "timer" and self._for_later(self.heard())):
+            print(f"{name} for a device command ({self.heard()!r}): home_assistant instead", flush=True)
+            name, impl, args = "home_assistant", self._home_assistant, {"command": self.heard()}
         if name == "get_weather" and self.home and not str(args.get("location", "")).strip():
             args["location"] = self.home
         try:
@@ -953,11 +972,15 @@ class Toolbox:
         if HA_DIRECT and self.heard is not None:  # what the user said, when it's a command ha.py understands
             try:
                 import ha
-                command = ha.pick(command, self.heard() or "", ha.devices(_ha_url(), ha_token(), max_age=ha.STATE_S))
+                heard = self.heard() or ""
+                later = self._later(heard) or self._later(command)
+                if later:
+                    return later
+                command = ha.pick(command, heard, ha.devices(_ha_url(), ha_token(), max_age=ha.STATE_S))
             except Exception as e:
                 print(f"home_assistant: can't check the user's words ({e!r})", flush=True)
         if not is_risky(command) or os.environ.get("MING_CONFIRM_RISKY", "1") == "0":
-            return home_assistant(command)
+            return home_assistant(command, self.room)
         words = lambda s: set(re.findall(r"[a-z0-9]+", s.lower())) - {"the", "a", "my", "please", "can", "you"}
         p, self._confirm = self._confirm, None
         # The yes has to come from the user in a later turn (never the same reply that asked), within a minute,
@@ -966,7 +989,7 @@ class Toolbox:
         if (p is not None and p[1] < self.turn and time.time() - p[2] < CONFIRM_WINDOW_S
                 and (confirmed in (True, "true", "True", "yes") or words(command) == words(p[0]))
                 and words(command) <= words(p[0])):
-            text, info = home_assistant(p[0])
+            text, info = home_assistant(p[0], self.room)
             return text, dict(info, confirmed=True)
         self._confirm = (command, self.turn, time.time())
         q = command.rstrip(".?! ")
@@ -974,6 +997,44 @@ class Toolbox:
         return (f"Not done yet: this needs the user's confirmation, and you asked them: \"{say}\" If they say yes, "
                 f"call home_assistant again with the same command and confirmed=true; otherwise don't.",
                 {"say": say, "needs_confirmation": True})
+
+    def direct(self, said: str) -> bool:
+        """Is `said` plainly a command for the user's devices (ha.confident)? Then it goes to home_assistant."""
+        if not (HA_DIRECT and said and "home_assistant" in self.names):
+            return False
+        try:
+            import ha
+            return ha.confident(said, ha.devices(_ha_url(), ha_token()), self.room)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _for_later(said: str) -> bool:
+        import ha
+        return bool(ha.DELAY.search(said or "") or re.search(r"\b(remind|reminder|timer|alarm)\b", said or "", re.I))
+
+    def _later(self, said: str, message: str = "") -> tuple[str, dict] | None:
+        """'Turn off the lights in 20 minutes' -> run 'turn off the lights' then (a timer that does it): the result,
+        or None when `said` isn't a device command for later. message: the timer tool's own text of the command."""
+        import ha
+        m = ha.DELAY.search(said or "")
+        if not m or re.search(r"\b(remind|reminder|timer|alarm|wake me)\b", said, re.I):
+            return None
+        when = parse_when(m.group())
+        command = (message or (said[:m.start()] + " " + said[m.end():])).strip(" ,.?!")
+        p = ha.parse(command)
+        if when is None or p["action"] in (None, "status") or not ha.confident(
+                command, ha.devices(_ha_url(), ha_token()), self.room):
+            return None
+        due, is_duration = when
+        now = _dt.datetime.now().astimezone()
+        spoken = f"in {spoken_duration((due - now).total_seconds())}" if is_duration else spoken_at(due, now)
+        what = re.sub(r"\bmy\b", "your", re.sub(r"\bme\b", "you", p["text"]))
+        if is_risky(command):
+            say = f"I'd rather not {what} on a timer. Ask me when you want it done."
+            return "Not scheduled: risky actions are only done when the user asks at the time.", {"say": say}
+        self.timers.add(due.timestamp(), what, None, ha=command)
+        return f"Scheduled: {command!r} {spoken}.", {"say": f"Okay, I'll {what} {spoken}.", "when": spoken}
 
     # -- the user said goodbye: the server ends the conversation once the goodbye has played --
     def _end_conversation(self, **_) -> tuple[str, dict]:
@@ -1009,6 +1070,18 @@ class Toolbox:
         action, when, message = (action or "set").strip().lower(), str(when or "").strip(), str(message or "").strip()
         now = _dt.datetime.now().astimezone()
         if action == "set":
+            said = self.heard() if self.heard is not None else ""
+            if message and HA_DIRECT and "home_assistant" in self.names and not re.search(
+                    r"\b(remind|reminder|alarm)\b", said, re.I):
+                try:
+                    import ha
+                    spoke = bool(ha.DELAY.search(said))  # (else the model's command and time)
+                    later = self._later(said if spoke else f"{message} {'' if when.startswith(('in ', 'at ')) else 'in '}{when}",
+                                        "" if spoke else message)
+                    if later:
+                        return later
+                except Exception as e:
+                    print(f"timer: can't check for a device command ({e!r})", flush=True)
             parsed = parse_when(when) or (parse_when(message) if not when else None)
             if parsed is None:
                 return (f"Error: could not understand the time {when!r}. Ask the user when it should go off.",
@@ -1017,7 +1090,7 @@ class Toolbox:
             secs = (due - now).total_seconds()
             message, alarm = reminder_text(message)
             self.timers.add(due.timestamp(), message, secs if is_duration else None, alarm)
-            spoken = f"in {spoken_duration(secs)}" if is_duration else f"at {spoken_time(due, now)}"
+            spoken = f"in {spoken_duration(secs)}" if is_duration else spoken_at(due, now)
             say = (f"Okay, timer set for {spoken_duration(secs)}." if is_duration and not message
                    else f"Okay, I'll remind you {spoken}.")
             return f"Set; it goes off {spoken}.", {"when": spoken, "message": message, "say": say}
@@ -1027,7 +1100,7 @@ class Toolbox:
                 return "No timers or reminders are set.", {}
             return "; ".join(
                 (f"{spoken_duration(t['duration'])} timer" if t["duration"] and not t["label"] else
-                 f"reminder: {t['label'] or 'no message'}")
+                 f"scheduled: {t['label']}" if t.get("ha") else f"reminder: {t['label'] or 'no message'}")
                 + f", {spoken_duration(t['due'] - time.time())} left (goes off at "
                   f"{spoken_time(_dt.datetime.fromtimestamp(t['due']).astimezone(), now)})" for t in items), {}
         if action == "cancel":
@@ -1128,6 +1201,30 @@ def tool_guidance(home: str = "") -> str:
             "only for the time somewhere else. After a tool returns, answer "
             "from its results in one or two short spoken sentences, never reading out URLs, citation numbers or lists. "
             "If the results don't answer the question, say so briefly." + remembered())
+
+
+# A few worked calls in the exact format (only for the tools on offer): cheaper than fine-tuning, and they show the
+# model to pass the user's words through whole (two devices, a delay, a room) rather than to answer from memory.
+EXAMPLES = [
+    ("home_assistant", "turn off the kitchen lights and lock the front door",
+     {"command": "turn off the kitchen lights and lock the front door"}),
+    ("home_assistant", "is the garage open?", {"command": "is the garage open?"}),
+    ("home_assistant", "turn the heat off in an hour", {"command": "turn the heat off in an hour"}),
+    ("timer", "remind me to take the bread out in 20 minutes",
+     {"action": "set", "when": "20 minutes", "message": "take the bread out"}),
+]
+
+
+def tool_examples(specs) -> str:
+    names = {s["function"]["name"] for s in specs}
+    props = {s["function"]["name"]: s["function"]["parameters"].get("properties", {}) for s in specs}
+    shown = [(n, q, {k: v for k, v in a.items() if k in props[n]}) for n, q, a in EXAMPLES if n in names]
+    shown = [(n, q, a) for n, q, a in shown if a]
+    if not shown:
+        return ""
+    return "Examples of calls:\n" + "".join(
+        f"User: {q}\n<tool_call>{n}\n" + "".join(f"<arg_key>{k}</arg_key>\n<arg_value>{v}</arg_value>\n"
+                                                 for k, v in a.items()) + "</tool_call>\n" for n, q, a in shown)
 
 
 def remembered() -> str:
