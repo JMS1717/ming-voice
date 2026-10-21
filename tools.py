@@ -598,7 +598,21 @@ HA_SPEC = _fn("home_assistant", "Control or ask about devices in the user's home
               "servers, not general questions). Pass the request as a "
               "short plain command or question naming the device or room, e.g. 'turn off the kitchen lights', "
               "'set the living room lamp to 30 percent', 'is the car locked?'.",
-              {"command": {"type": "string", "description": "the request, in plain English"}}, ["command"])
+              {"command": {"type": "string", "description": "the request, in plain English"},
+               "confirmed": {"type": "boolean", "description": "true only when you asked the user to confirm this "
+                                                               "action and they just said yes"}}, ["command"])
+# Actions that are hard to take back or open the house up: Ming asks first ("Do you want me to unlock the front
+# door?") and only does it when the next turn says yes. MING_CONFIRM_RISKY=0 turns this off.
+RISKY_RE = re.compile(r"\b(unlock|disarm)|\b(open|raise|lift)\b.*\b(garage|gate|door)|\b(garage|gate)\b.*\bopen"
+                      r"|\b(alarm|security)\b.*\b(off|disable|deactivate)\b|\b(off|disable|deactivate)\b.*\b(alarm|security)\b",
+                      re.I)
+CONFIRM_WINDOW_S = 60
+
+
+def is_risky(command: str) -> bool:
+    c = command.strip().lower()
+    question = c.endswith("?") or re.match(r"(is|are|was|did|does|do|what|which|how|who|when|why)\b", c)
+    return bool(RISKY_RE.search(c)) and not question
 JELLYFIN_SPEC = _fn("jellyfin", "The user's Jellyfin media server (movies, shows, music): search the library, play "
                     "something on a device where the Jellyfin app is open (a show continues with the next episode), "
                     "pause/resume/stop/next/previous, what's playing, which devices are available.",
@@ -642,6 +656,11 @@ class Toolbox:
         self._last_delegation = 0.0
         self.home = home  # the user's location: in the system prompt, and the default for the weather
         self.timers = Timers()  # (the server starts it: Timers.start(on_fire))
+        self.turn = 0  # conversation turns (Thinker.stream): a confirmation has to come in a later turn
+        self._confirm = None  # (command, turn, time) of a risky action waiting for the user's yes
+
+    def new_turn(self):
+        self.turn += 1
 
     def signature(self) -> str:
         """What the system prompt depends on (a change means rebuilding the context)."""
@@ -654,7 +673,8 @@ class Toolbox:
     def run(self, name: str, args: dict, cancel: threading.Event | None = None) -> tuple[str, dict]:
         """-> (result text for the model, info for the UI: query/sources/elapsed/error)"""
         t0 = time.perf_counter()
-        impl = ({**_IMPL, "ask_hermes": self._ask_hermes, "timer": self._timer}).get(name) if name in self.names else None
+        impl = ({**_IMPL, "ask_hermes": self._ask_hermes, "timer": self._timer,
+                 "home_assistant": self._home_assistant}).get(name) if name in self.names else None
         if impl is None:
             return f"Error: there is no tool named {name!r}.", {"error": "unknown tool"}
         args = {k: v for k, v in (args or {}).items() if isinstance(k, str)}
@@ -673,6 +693,28 @@ class Toolbox:
         info = dict(info or {}, elapsed_ms=round((time.perf_counter() - t0) * 1000))
         return text, info
 
+
+    # -- Home Assistant, with a spoken confirmation for risky actions --
+    def _home_assistant(self, command: str = "", confirmed=False) -> tuple[str, dict]:
+        command = str(command or "").strip()
+        if not is_risky(command) or os.environ.get("MING_CONFIRM_RISKY", "1") == "0":
+            return home_assistant(command)
+        words = lambda s: set(re.findall(r"[a-z0-9]+", s.lower())) - {"the", "a", "my", "please", "can", "you"}
+        p, self._confirm = self._confirm, None
+        # The yes has to come from the user in a later turn (never the same reply that asked), within a minute,
+        # for the same thing (an "unlock the back door" right after asking about the front door is asked again).
+        # What runs is what the user was asked about.
+        if (p is not None and p[1] < self.turn and time.time() - p[2] < CONFIRM_WINDOW_S
+                and (confirmed in (True, "true", "True", "yes") or words(command) == words(p[0]))
+                and words(command) <= words(p[0])):
+            text, info = home_assistant(p[0])
+            return text, dict(info, confirmed=True)
+        self._confirm = (command, self.turn, time.time())
+        q = command.rstrip(".?! ")
+        say = f"Just to be sure: do you want me to {q[:1].lower() + q[1:]}?"
+        return (f"Not done yet: this needs the user's confirmation, and you asked them: \"{say}\" If they say yes, "
+                f"call home_assistant again with the same command and confirmed=true; otherwise don't.",
+                {"say": say, "needs_confirmation": True})
 
     # -- timers and reminders (they go off through Timers.on_fire) --
     def _timer(self, action: str = "set", when: str = "", message: str = "") -> tuple[str, dict]:

@@ -30,3 +30,6 @@ e2e/out/
 e2e/clone_test.wav
 eval/
 dev/scratch/
+.client.json
+windows/ming_client.log
+windows/.ming_client.pid

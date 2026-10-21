@@ -71,8 +71,24 @@ bash setup_env.sh                          # Python env (ROCm PyTorch wheels) + 
   models, and opens <http://localhost:8000>. Make a shortcut to it for your Desktop.
 * **WSL shell:** `./run.sh`, then open <http://localhost:8000>.
 
-To start it whenever you sign in to Windows (an always-on assistant), run
-`powershell -ExecutionPolicy Bypass -File windows\install_autostart.ps1` once (`-Remove` undoes it).
+### Always on, without a browser
+
+`windows\Ming Voice (always on).cmd` starts the server (minimized), phone access, and **`windows\ming_client.py`**,
+a background client that uses the PC's own microphone and speakers. No tab to keep open and no Start button:
+say "Hey Ming, …" any time. Timer alarms and announcements play through the speakers too.
+
+* To start it whenever you sign in to Windows, run
+  `powershell -ExecutionPolicy Bypass -File windows\install_autostart.ps1` once (`-Remove` undoes it;
+  `-Browser` autostarts the browser app instead).
+* Needs Python for Windows with `pip install sounddevice websockets numpy`.
+* Settings go in `.client.json` in the project folder (not committed), e.g.
+  `{"wake_word": "Ming", "home": "Paris", "voice": "US_Emma", "input_device": "USB Mic", "barge_in": false}`;
+  `python windows\ming_client.py --list-devices` lists microphones and speakers. The log is
+  `windows\ming_client.log`; `python windows\ming_client.py --stop` stops it.
+* On speakers the microphone is muted while Ming talks, so it never hears and answers itself. With a headset, set
+  `"barge_in": true` to be able to talk over it.
+* One device holds the conversation at a time: opening the app on your phone takes over, and the PC client takes
+  it back by itself 15 s after the phone app is closed.
 
 Keep the server window open while you use it — WSL shuts its VM down when nothing is attached. Close it when
 you're done: it holds ~20 GB of VRAM and keeps the GPU out of its deepest idle state (see Troubleshooting).
@@ -128,6 +144,45 @@ With **Web search & tools** on (Settings, default), the assistant can call tools
 Tools that change something (timers, Home Assistant, Jellyfin, Hermes) never run for a speculative reply: they wait until your
 turn has really ended, so a pause mid-sentence can't switch a light. Files are read at server start.
 
+**Risky actions are confirmed first.** Unlocking, opening a garage door or gate, and disarming or turning off an
+alarm get a question back (*"Just to be sure: do you want me to unlock the front door?"*) and only happen when
+you say yes in your next turn, within a minute. What runs is exactly what you were asked about; a yes in the same
+reply that asked, or a different device, doesn't count. Questions ("is the garage open?") and locking/closing
+don't ask. `MING_CONFIRM_RISKY=0` turns this off.
+
+### Announcements from Home Assistant (or anything else)
+
+Ming can say things that happen at home: the doorbell, the washer finishing, the garage left open. With a
+Home Assistant token configured, the server listens on HA's event bus for **`ming_announce`** events, so all
+it takes is an automation with an *event* action (no HA integration, `configuration.yaml` change or restart):
+
+```yaml
+alias: Doorbell → Ming
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.front_doorbell
+    to: "on"
+actions:
+  - action: event
+    event: ming_announce
+    event_data:
+      message: Someone is at the front door.
+      # chime: false      no chime before it
+      # verbatim: false   pass it on in Ming's own words instead of exactly
+      # ttl: 300          drop it if it can't be said within this many seconds
+```
+
+Or from a script, another server, or an HA `rest_command`: `POST /api/announce` with the same fields as JSON
+(on the LAN port, with `Authorization: Bearer <access key>`):
+
+```bash
+curl -X POST http://localhost:8000/api/announce -H "Content-Type: application/json" \
+  -d '{"message": "The washer is done."}'
+```
+
+An announcement waits for a quiet moment (never mid-sentence), plays a short chime, and is said whether the
+wake word has been heard or not. `MING_HA_EVENTS=0` turns the event listener off.
+
 ### API
 
 An OpenAI-compatible API runs on the same server; interactive docs at <http://localhost:8000/docs>.
@@ -176,7 +231,7 @@ never disturb a live conversation. `dev/test_api.py` exercises every endpoint.
 | `MING_LAN_PORT` | `8001` | Key-protected port for the phone proxy (localhost only; `lan_proxy.py --target`). |
 | `MING_API_KEY` | – | Require this key (`Authorization: Bearer …`) on every port, including localhost. |
 | `MING_MODEL_DIR` | `./model` | Model folder. |
-| `MING_MAX_CTX` | `8192` (`4096` in int8 mode) | Conversation context (tokens) before rolling over to a text history. |
+| `MING_MAX_CTX` | `8192` (`16384` from 32 GB of VRAM, `4096` in int8 mode) | Conversation context (tokens). It costs VRAM (~60 MB per 1k tokens allocated at start, plus bigger graph buffers: 16k takes ~1.5 GB more than 8k, which leaves a 24 GB card too little working memory) but not speed: attention only reads the filled part, so short conversations are as fast as with a small context. When it fills up, the context is rebuilt between turns (while nobody is talking, ~0.5 s) from the conversation so far as text: the first two exchanges and the most recent ones, up to 4k tokens. |
 | `MING_INT8_EXPERTS` | `auto` | Weight-only int8 for the MoE experts (`1`/`0`/`auto` = int8 below 23 GB VRAM). Measured vs bf16: identical greedy replies and transcripts on the test set, logit cosine ≥ 0.997, +2% NLL. |
 | `MING_VRAM_LIMIT_GB` | – | Cap PyTorch's VRAM use (to emulate a smaller card). |
 | `MING_CFM_STEPS` | `10` | Talker flow-matching steps (fewer is faster but degrades speech). |
@@ -187,6 +242,8 @@ never disturb a live conversation. `dev/test_api.py` exercises every endpoint.
 | `MING_ECHO_DEBUG` | unset | Log what the echo guard measured (correlation, delay, levels) whenever a barge-in fires. |
 | `MING_FAST_TALKER` / `MING_GRAPHS` | `1` / `1` | Fused Triton Talker path / HIP graphs (set `0` to fall back to the reference code). |
 | `MING_TRACEMALLOC` | `0` | Python allocation tracing for `/api/debug/mem`. |
+| `MING_CONFIRM_RISKY` | `1` | Ask before unlocking, opening the garage/gate, or disarming an alarm (Home Assistant). |
+| `MING_HA_EVENTS` | `1` | Say Home Assistant `ming_announce` events (needs `.ha_token`). |
 
 ## How it works
 

@@ -69,6 +69,26 @@ check(tb.run("timer", {"action": "cancel", "message": "the trash reminder"})[0] 
       len(tb.timers.items) == 1 and tb.timers.items[0]["duration"], "cancel by name keeps the other one")
 check(tb.run("timer", {"action": "cancel", "message": "all"})[0] == "Cancelled 1." and not tb.timers.items, "cancel all")
 tb.timers.path.unlink(missing_ok=True)
+import tools  # noqa: E402  risky Home Assistant actions need a yes in a later turn
+sent = []
+tools.home_assistant = lambda command: (sent.append(command) or "Done.", {"targets": [command]})
+hb = Toolbox(specs=tools.SPECS + [tools.HA_SPEC])
+ha = lambda cmd, **kw: hb.run("home_assistant", {"command": cmd, **kw})
+hb.new_turn()
+check(ha("turn off the lamp")[0].startswith("Done.") and sent == ["turn off the lamp"], "safe action runs at once")
+r = ha("unlock the front door")
+check(r[1].get("needs_confirmation") and "unlock the front door?" in r[1]["say"] and len(sent) == 1, f"risky asks: {r}")
+check(ha("unlock the front door", confirmed=True)[1].get("needs_confirmation"), "no yes in the same turn")
+hb.new_turn()
+check(ha("unlock the back door", confirmed=True)[1].get("needs_confirmation"), "a different door is asked again")
+hb.new_turn()
+r = ha("unlock back door", confirmed=True)
+check(r[1].get("confirmed") and sent[-1] == "unlock the back door", f"confirmed next turn runs what was asked: {r}")
+check(ha("open the garage door")[1].get("needs_confirmation"), "garage asks")
+for cmd in ("is the garage open?", "Is the garage door open", "lock the front door", "turn on the porch light"):
+    check(not tools.is_risky(cmd), f"not risky: {cmd}")
+for cmd in ("disarm the alarm", "turn off the security system", "raise the garage door", "open the gate"):
+    check(tools.is_risky(cmd), f"risky: {cmd}")
 check(tb.run("rm_rf", {})[0].startswith("Error"), "unknown tool -> error text, no exception")
 check(tb.run("calculate", {"nope": 1})[0].startswith("Error"), "bad arguments -> error text, no exception")
 

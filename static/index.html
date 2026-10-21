@@ -622,7 +622,7 @@ function addMsg(cls, text) {
   const m = document.createElement('div'); m.className = 'meta'; d.appendChild(m);
   $('log').appendChild(d); scrollLog(); return d;
 }
-const TOOL_ICON = { web_search: '🔎', get_weather: '🌤', calculate: '🧮', get_current_time: '🕒', home_assistant: '🏠', jellyfin: '🎬', ask_hermes: '🤖', hermes_result: '🤖', timer: '⏲', timer_done: '⏰' };
+const TOOL_ICON = { web_search: '🔎', get_weather: '🌤', calculate: '🧮', get_current_time: '🕒', home_assistant: '🏠', jellyfin: '🎬', ask_hermes: '🤖', hermes_result: '🤖', timer: '⏲', timer_done: '⏰', announcement: '📣' };
 function showTool(msgEl, m) {  // a tool call shown above the reply: what it looked up, and the sources
   let box = msgEl.querySelector('.tools');
   if (!box) { box = document.createElement('div'); box.className = 'tools'; msgEl.prepend(box); }
@@ -634,7 +634,7 @@ function showTool(msgEl, m) {  // a tool call shown above the reply: what it loo
   const verb = { web_search: ['Searching', 'Searched'], get_weather: ['Checking the weather', 'Weather'],
                  calculate: ['Calculating', 'Calculated'], get_current_time: ['Checking the time', 'Checked the time'],
                  home_assistant: ['Home Assistant', 'Home Assistant'], ask_hermes: ['Asking Hermes', 'Passed to Hermes'], jellyfin: ['Jellyfin', 'Jellyfin'],
-                 hermes_result: ['Hermes finished', 'Hermes finished'], timer: ['Timer', 'Timer'], timer_done: ['Time’s up', 'Time’s up'] }[m.name] || [m.name, m.name];
+                 hermes_result: ['Hermes finished', 'Hermes finished'], timer: ['Timer', 'Timer'], timer_done: ['Time’s up', 'Time’s up'], announcement: ['Announcement', 'Announcement'] }[m.name] || [m.name, m.name];
   row.textContent = `${TOOL_ICON[m.name] || '🛠'} ${verb[m.status === 'done' ? 1 : 0]}${what ? ': ' + what : ''}${m.status === 'done' ? '' : '…'}`;
   if (m.status === 'done' && m.error) row.textContent += ' (failed)';
   if (m.status === 'done' && (m.sources || []).length) {
@@ -724,6 +724,7 @@ function connect() {
         if (!['hearing', 'thinking', 'speaking'].includes(state)) restState();
         break;
       case 'alarm': chime([880, 660, 880, 660, 880, 660], 0.16, 0.25); break;  // a timer or reminder went off
+      case 'chime': chime([988, 784], 0.22, 0.2); break;  // an announcement (Home Assistant, a script)
       case 'interrupt':
         stopPlayback(); finishBot(true); restState(); break;
       case 'retract': {  // you kept talking right after it started answering: that reply is withdrawn and

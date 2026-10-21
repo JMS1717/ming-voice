@@ -51,9 +51,11 @@ TOOLBOX = Toolbox()  # web search, weather, calculator, clock, timers, Home Assi
 NOTICES: list = []
 
 
-def _notify(prompt: str, events: list):
-    """prompt: 'what happened) what to do', completing '(Notification for you, not said by the user: '"""
-    NOTICES.append({"prompt": f"(Notification for you, not said by the user: {prompt}", "events": events})
+def _notify(prompt: str, events: list, ttl: float | None = None):
+    """prompt: 'what happened) what to do', completing '(Notification for you, not said by the user: '.
+    ttl: drop it if it couldn't be said within this many seconds (nobody connected, a long conversation)."""
+    NOTICES.append({"prompt": f"(Notification for you, not said by the user: {prompt}", "events": events,
+                    "expires": time.time() + ttl if ttl else None})
     sess = ACTIVE.get("sess")
     if sess is not None:
         sess.loop.call_soon_threadsafe(sess.deliver_notices)
@@ -80,6 +82,62 @@ def _timer_fired(t: dict, late_s: float):
             [{"type": "alarm"},
                    {"type": "tool", "status": "done", "name": "timer_done",
                     "args": {"message": t["label"] or f"{spoken_duration(t['duration'] or 0)} timer"}}])
+
+
+def announce(message: str, chime: bool = True, verbatim: bool = True, source: str = "Home Assistant",
+             ttl: float = 300) -> bool:
+    """Say something to the user at the next quiet moment (doorbell, washer done, garage left open...).
+    verbatim: say exactly `message`; else it's information to pass on in the assistant's own words."""
+    message = " ".join(str(message or "").split())[:500]
+    if not message:
+        return False
+    log(f"announcement from {source}: {message!r}")
+    if verbatim:
+        prompt = f'{source} sent an announcement for the user.) Say exactly this to the user, nothing else: "{message}"'
+    else:
+        prompt = f"{source} sent this for the user: {message}) Tell the user briefly, in your own words."
+    _notify(prompt, ([{"type": "chime"}] if chime else []) +
+            [{"type": "tool", "status": "done", "name": "announcement", "args": {"message": message, "source": source}}],
+            ttl)
+    return True
+
+
+def _ha_events():
+    """Listen on Home Assistant's event bus for `ming_announce` events and say them. In an HA automation:
+        action: event
+        event: ming_announce
+        event_data: {message: "Someone is at the front door."}   # optional: chime: false, verbatim: false
+    Nothing to configure in HA beyond that (the event bus needs no integration or restart)."""
+    from websockets.sync.client import connect
+    from tools import _ha_url, ha_token
+    url = re.sub(r"^http", "ws", _ha_url()) + "/api/websocket"
+    delay = 5
+    while True:
+        try:
+            with connect(url, open_timeout=10, max_size=2**22) as ws:
+                json.loads(ws.recv())  # auth_required
+                ws.send(json.dumps({"type": "auth", "access_token": ha_token()}))
+                if json.loads(ws.recv()).get("type") != "auth_ok":
+                    log("Home Assistant events: the token was rejected; not listening")
+                    return
+                ws.send(json.dumps({"id": 1, "type": "subscribe_events", "event_type": "ming_announce"}))
+                r = json.loads(ws.recv())
+                if not r.get("success"):
+                    log(f"Home Assistant events: can't subscribe ({r.get('error')}); not listening")
+                    return
+                log("Home Assistant: listening for ming_announce events")
+                delay = 5
+                for raw in ws:
+                    m = json.loads(raw)
+                    if m.get("type") == "event":
+                        d = m["event"].get("data") or {}
+                        no = (False, "false", "no", 0)
+                        announce(d.get("message", ""), chime=d.get("chime", True) not in no,
+                                 verbatim=d.get("verbatim", True) not in no, ttl=float(d.get("ttl", 300)))
+        except Exception as e:
+            log(f"Home Assistant events: {type(e).__name__}: {e}; reconnecting in {delay}s")
+        time.sleep(delay)
+        delay = min(delay * 2, 300)
 
 
 TOOLBOX.on_delegate_done = _delegate_done
@@ -181,6 +239,10 @@ def _warmup():
     th.reset()
     for _ in th.stream(None, user_text="Say hi.", max_new_tokens=8):
         pass
+    for n in ((500, 1500, 4000) if full else ()):  # long text prompts (a context rollover): ~14 s of JIT when cold
+        th.reset()
+        for _ in th.stream(None, user_text="Hello there. " * (n // 3), max_new_tokens=2):
+            pass
     for k in (range(1, 25) if full else (2, 6)):  # background ASR uses the stateless HF path: warm its shapes too
         n = k * 8000
         th.transcribe((0.05 * np.sin(np.arange(n) / 16000 * 2 * np.pi * 180)).astype(np.float32), max_new_tokens=4)
@@ -199,10 +261,13 @@ def _warmup():
 @asynccontextmanager
 async def lifespan(_app):
     await asyncio.get_running_loop().run_in_executor(None, _load)
+    from tools import ha_token
+    if ha_token() and os.environ.get("MING_HA_EVENTS", "1") != "0":
+        threading.Thread(target=_ha_events, daemon=True, name="ha-events").start()
     yield
 
 
-app = FastAPI(lifespan=lifespan, title="Ming Voice", version="1.1",
+app = FastAPI(lifespan=lifespan, title="Ming Voice", version="1.3",
               description="Local speech-to-speech assistant. The web app is at `/`; the OpenAI-compatible API is "
                           "under `/v1`. From other devices (LAN port) send `Authorization: Bearer <access key>`.")
 api.setup(ENGINE, GPU_TURN, VOICES)
@@ -247,10 +312,28 @@ def lan_status(request: Request):
 def health():
     th = ENGINE.get("thinker")
     return {"ready": bool(ENGINE.get("ready")), "ctx_tokens": th.ctx_len() if th else 0,
+            "max_ctx": th.max_ctx if th else 0, "connected": ACTIVE.get("sess") is not None,
             "talker_steps": getattr(ENGINE.get("talker"), "steps", None),
             "gpu_mem_gib": round(torch.cuda.memory_allocated() / 2**30, 2),
             "gpu_reserved_gib": round(torch.cuda.memory_reserved() / 2**30, 2),
             "gpu_free_gib": round(torch.cuda.mem_get_info()[0] / 2**30, 2)}
+
+
+@app.post("/api/announce")
+async def api_announce(req: Request):
+    """Have the assistant say something at the next quiet moment, e.g. from a Home Assistant rest_command or a
+    script: {"message": "The washer is done.", "chime": true, "verbatim": true, "ttl": 300}. verbatim=false passes
+    it on in the assistant's own words. Dropped if it can't be said within ttl seconds (nobody connected)."""
+    try:
+        d = await req.json()
+    except Exception:
+        d = {}
+    if not isinstance(d, dict) or not str(d.get("message", "")).strip():
+        return JSONResponse({"error": "message is required"}, status_code=400)
+    no = (False, "false", "no", 0)
+    announce(d["message"], chime=d.get("chime", True) not in no, verbatim=d.get("verbatim", True) not in no,
+             source=str(d.get("source") or "Home Assistant")[:40], ttl=float(d.get("ttl", 300)))
+    return {"queued": True, "connected": ACTIVE.get("sess") is not None}
 
 
 def _all_voices():
@@ -502,18 +585,21 @@ class Session:
         """Announce finished background tasks at the next quiet moment (event loop)."""
         if not NOTICES or ACTIVE.get("sess") is not self:
             return
-        busy = (self.in_speech or self.responding or self.spec is not None or self.ptt_down
-                or (self.reply is not None and self.reply.active))
-        if busy:
+        if self._busy():
             self.loop.call_later(0.5, self.deliver_notices)
             return
         n = NOTICES.pop(0)
+        if n.get("expires") and time.time() > n["expires"]:
+            log(f"dropped a stale notification: {n['prompt'][:120]!r}")
+            if NOTICES:
+                self.loop.call_soon(self.deliver_notices)
+            return
         for ev in n["events"]:
-            if ev["type"] == "alarm":  # the chime plays before the announcement
+            if ev["type"] in ("alarm", "chime"):  # the chime plays before the announcement
                 self.emit_json(ev)
         r = self.start_reply(None, user_text=n["prompt"])
         for ev in n["events"]:
-            if ev["type"] != "alarm":
+            if ev["type"] not in ("alarm", "chime"):
                 self.emit_json(ev)
         if NOTICES:
             self.loop.call_later(1.0, self.deliver_notices)
@@ -794,6 +880,27 @@ class Session:
         """A reply finished generating (event loop): stay awake until it has played, plus the follow-up window."""
         if self.mode == "wake":
             self._stay_awake(max(0.0, self.play_until - time.time()) + self.follow_up_s)
+        if ENGINE["thinker"].needs_compact():
+            self.loop.call_later(max(0.0, self.play_until - time.time()) + 1.5, self._maybe_compact)
+
+    def _busy(self):
+        return (self.in_speech or self.responding or self.spec is not None or self.ptt_down
+                or (self.reply is not None and self.reply.active))
+
+    def _maybe_compact(self):
+        """The context is nearly full: rebuild it now, while nobody is talking, so the next turn doesn't pay for
+        it. (If someone is, the next reply's end tries again; failing that, the turn itself rolls over.)"""
+        th = ENGINE["thinker"]
+        if ACTIVE.get("sess") is not self or self._busy() or not th.needs_compact():
+            return
+
+        def run():
+            with GPU_TURN:
+                with self.undo_lock:  # (an undo restores across it fine: the turns come back as text)
+                    undo = self.pending_restore is not None
+                if not undo and not self._busy() and th.needs_compact():
+                    th.compact()
+        threading.Thread(target=run, daemon=True).start()
 
     def _maybe_sleep(self):
         if self.mode == "wake" and not self.awake and not self.in_speech and self.wake_pending is None:
@@ -921,7 +1028,10 @@ class Session:
                 m["first_frag"] = m["first_frag"] or time.perf_counter()
                 frag_q.put(piece)
         except Exception as e:  # keep the session alive
-            log("thinker error:", repr(e))
+            import traceback
+            where = " <- ".join(f"{Path(f.filename).name}:{f.lineno} {f.name}"
+                                for f in reversed(traceback.extract_tb(e.__traceback__)[-6:]))
+            log("thinker error:", repr(e)[:300], "at", where)
             r.emit("json", {"type": "error", "message": f"thinker: {e}"})
         finally:
             frag_q.put(None)

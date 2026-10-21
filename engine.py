@@ -37,6 +37,8 @@ ROLE_END = "<|role_end|>"
 TOOL_CALL_ID = 156896  # <tool_call>: the model wants to call a function instead of answering (tools.py)
 MAX_TOOL_ROUNDS = 3  # call -> results -> (another call -> results ...) -> answer
 TOOL_RESERVE = 1500  # context kept free for tool results when tools are on
+ROLLOVER_MAX = 4096  # at most this much earlier conversation (as text) carries over a context rollover
+COMPACT_HEADROOM = 1200  # compact between turns once less than this (+ the tool reserve) is left for the next turn
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a friendly, helpful voice assistant in a live spoken conversation. "
@@ -181,6 +183,7 @@ _FUSED_PREFILL = os.environ.get("MING_FUSED_PREFILL", "1") == "1"
 _FUSED_OPS = os.environ.get("MING_FUSED_OPS", "1") == "1"  # Triton RMSNorm + one-token MoE router
 _PREFILL_GRAPHS = os.environ.get("MING_PREFILL_GRAPHS", "1") == "1"  # graph-captured prefill, padded to buckets
 PREFILL_BUCKETS = (32, 64, 128)  # prompt lengths with a prefill graph (longer prompts run eagerly)
+PREFILL_CHUNK = 512  # longer eager prompts run in pieces this long (bounds the attention scratch memory)
 
 
 def _patch_norms(model):
@@ -573,8 +576,13 @@ class Thinker:
         self.tools = None  # tools.Toolbox offered to the model (part of the system prompt: change -> reset)
         self._tools_sig = None
         self._sys_cache = {}  # system block text -> saved cache state (_prefill_system)
-        # smaller default context in low-VRAM (int8) mode: the MLA cache is ~60 MB per 1k tokens
-        self.max_ctx = int(os.environ.get("MING_MAX_CTX", "4096" if self.int8_experts else "8192"))
+        # The MLA cache is ~60 MB per 1k tokens, allocated up front. A bigger context doesn't slow short ones down
+        # (decode/prefill graphs exist per attention-length bucket and only read the filled part), so it's sized
+        # by VRAM: 8k on a 24 GB card (16k fits, but leaves the BLAS/kernel libraries too little working memory
+        # next to the Talker: they allocate outside PyTorch and fail hard), 16k from 32 GB, 4k in int8 mode.
+        big = torch.cuda.get_device_properties(DEVICE).total_memory >= 30 * 2**30
+        default = "4096" if self.int8_experts else "16384" if big else "8192"
+        self.max_ctx = int(os.environ.get("MING_MAX_CTX", default))
         self._build_cache()
         self.graph = None
         self._pad = None
@@ -873,6 +881,27 @@ class Thinker:
     def ctx_len(self):
         return self.cur_len
 
+    def needs_compact(self) -> bool:
+        reserve = TOOL_RESERVE if self.tools is not None else 0
+        return self.cur_len > 0 and self.cur_len + reserve + COMPACT_HEADROOM > self.max_ctx
+
+    @torch.inference_mode()
+    def compact(self):
+        """Roll the context over now, between turns, instead of at the start of the next one (where rebuilding
+        it from text would delay the reply): fresh cache = system prompt + the conversation so far as text.
+        The caller must hold the GPU lock."""
+        t = time.time()
+        n0 = self.cur_len
+        text = self._rollover_text(budget=min(self.max_ctx // 2, ROLLOVER_MAX))
+        hist = self.history
+        self.reset()
+        self.history = hist
+        self._prefill_system()
+        if text:
+            self._prefill(self.tok(text, return_tensors="pt", add_special_tokens=False).input_ids.to(DEVICE), {})
+        torch.cuda.synchronize()
+        log(f"context compacted between turns: {n0} -> {self.cur_len} tokens in {time.time() - t:.2f}s")
+
     def _prefill(self, ids, feats):
         m = self.model
         h = m.model.word_embeddings(ids)
@@ -898,9 +927,14 @@ class Thinker:
             self.prefill_graphs[(Tb, L)].replay()
             logits = self.p_logits
         else:
-            pos = torch.arange(self.cur_len, self.cur_len + T, device=DEVICE)
-            self.cache.attn_len = self.cur_len + T
-            logits = self._forward(h, pos)
+            # long prompts (a context rollover) in chunks: attention scores for all of it at once take ~1 GB
+            for s in range(0, T, PREFILL_CHUNK):
+                n = min(PREFILL_CHUNK, T - s)
+                for a in self._kda_attn:
+                    a.mode = "fused_recurrent" if n <= 192 else "chunk"
+                pos = torch.arange(self.cur_len + s, self.cur_len + s + n, device=DEVICE)
+                self.cache.attn_len = self.cur_len + s + n
+                logits = self._forward(h[:, s:s + n], pos)
         self.cur_len += T
         return int(logits[0].argmax())
 
@@ -948,14 +982,17 @@ class Thinker:
         n_tail = len(self.tok(tail, add_special_tokens=False).input_ids)
         rollover = ""
         reserve = TOOL_RESERVE if self.tools is not None else 0
+        if self.tools is not None:
+            self.tools.new_turn()  # (a risky action asked about in an earlier turn may now be confirmed)
+        budget = min(self.max_ctx // 2, ROLLOVER_MAX) - n_tail
         if self.cur_len and self.cur_len + n_tail + max_new_tokens + reserve + 8 > self.max_ctx:
-            rollover = self._rollover_text(budget=self.max_ctx // 2 - n_tail)
+            rollover = self._rollover_text(budget=budget)
             log(f"context limit reached: restarting from the last turns as text ({len(rollover)} chars)")
             hist = self.history
             self.reset()
             self.history = hist
         elif self.cur_len == 0 and self.rebuild and self.history:
-            rollover = self._rollover_text(budget=self.max_ctx // 2 - n_tail)
+            rollover = self._rollover_text(budget=budget)
         self.rebuild = False
         if self.cur_len == 0:
             self._prefill_system()
