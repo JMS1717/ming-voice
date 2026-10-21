@@ -150,7 +150,9 @@ Jellyfin only starts playback when you said to (play, watch, put on, listen, ...
 about watching or listening to something. An answer from search or weather results ends after a few sentences,
 rather than reading out a whole list of search results; any other answer ends after about 30 seconds of speech,
 unless you asked for something long (a story, a recipe, steps, "in detail", ...). Each reply privately starts
-from the local date and time, so "what time is it?" needs no tool.
+from the local date and time, so "what time is it?" needs no tool. And if a reply starts by claiming it can't
+look things up ("I don't have access to real-time data..."), it's caught before it's spoken and becomes a web
+search (or weather lookup) instead.
 
 **Risky actions are confirmed first.** Unlocking, opening a garage door or gate, and disarming or turning off an
 alarm get a question back (*"Just to be sure: do you want me to unlock the front door?"*) and only happen when

@@ -34,7 +34,8 @@ CASES = [  # (spoken question, tools wanted (empty: none), tools never wanted)
     ("Tell me a joke.", [], []),
     ("What's on my calendar tomorrow?", ANY, ["ask_hermes", "get_current_time"]),
     ("Can you check my email?", ANY, ["ask_hermes", "get_current_time"]),
-    ("Hey Ming, research the best electric cars this year and compare them.", ANY, ["ask_hermes", "get_current_time"]),
+    ("Hey Ming, research the best electric cars this year and compare them.", ["web_search"],
+     ["ask_hermes", "get_current_time"]),
     ("How much disk space is left on my server?", ANY, ["ask_hermes", "get_current_time"]),
     ("Hey Ming, what's the weather like tomorrow?", ["get_weather"], ["ask_hermes", "get_current_time"]),
     ("What is two hundred forty times thirty seven?", ANY, ["ask_hermes", "get_current_time", "web_search"]),
@@ -91,6 +92,8 @@ async def main():
                 now = time.time()
                 ok = ok and any(time.strftime("%I:%M", time.localtime(t)).lstrip("0") in r["text"]
                                 for t in (now, now - 60))
+            if "date" in q:  # the date, not the time
+                ok = ok and time.strftime("%B") in r["text"]
             refused = [t["name"] for t in r["tools"] if t.get("refused")]
             calls = [(t["name"], t.get("args")) for t in r["tools"] if not t.get("refused")]
             print(f"{'PASS' if ok else 'FAIL'} {q}\n     tools {calls}{f' + refused {refused}' if refused else ''}, "
