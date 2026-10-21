@@ -156,7 +156,7 @@ app.add_middleware(lan.AccessControl)
 
 @app.get("/", include_in_schema=False)
 def index():
-    return FileResponse(HERE / "static" / "index.html")
+    return FileResponse(HERE / "static" / "index.html", headers={"Cache-Control": "no-cache"})  # pick up updates
 
 
 @app.get("/manifest.webmanifest", include_in_schema=False)
