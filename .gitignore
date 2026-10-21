@@ -40,4 +40,4 @@ dev/scratch/
 windows/ming_client.log
 windows/.ming_client.pid
 .wsl_restart_needed
-anchors/UK_Charlotte.wav anchors/US_Emma.wav anchors/US_James.wav anchors/US_Stella.wav
+anchors/*.wav
