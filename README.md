@@ -25,14 +25,15 @@ Everything runs locally; no audio leaves the machine.
 | Thinker (audio LLM, 9.3B MoE / 2.7B active) | ~67 tokens/s decode, ~170 ms prefill for a short utterance |
 | Talker (speech synthesis) | ~0.3× real time end to end; 13 ms per 80 ms of audio for the core step |
 | Startup | ~30 s (first start after install: ~1–2 min to compile kernels) |
-| VRAM | ~20.5 GB |
+| VRAM | ~20.5 GB bf16 · ~12.5 GB with int8 experts (auto on < 23 GB cards) |
 | Speech quality | ASR round-trip WER 1.0% (same as the reference implementation) |
 
 ## Requirements
 
 * Windows 11 with **WSL2** and **Ubuntu 24.04**
-* AMD GPU supported by ROCm on WSL (tested: Radeon RX 7900 XTX) with ≥ 24 GB VRAM, and a recent AMD
-  Adrenalin driver with WSL support
+* AMD GPU supported by ROCm on WSL with **16 GB+ VRAM** (tested: Radeon RX 7900 XTX), and a recent AMD
+  Adrenalin driver with WSL support. Cards under 23 GB automatically use int8 expert weights (~12.5 GB total;
+  verified under a 14 GB cap); 24 GB cards keep bf16 (~20.5 GB).
 * ~30 GB free disk (model 20 GB + Python env)
 * [uv](https://docs.astral.sh/uv/) in WSL
 
@@ -85,7 +86,9 @@ you're done: it holds ~20 GB of VRAM and keeps the GPU out of its deepest idle s
 |---|---|---|
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | Bind address. The server is local-only by default; `HOST=0.0.0.0` exposes it on your network (browsers only allow the microphone on `localhost` or HTTPS). |
 | `MING_MODEL_DIR` | `./model` | Model folder. |
-| `MING_MAX_CTX` | `8192` | Conversation context (tokens) before rolling over to a text history. |
+| `MING_MAX_CTX` | `8192` (`4096` in int8 mode) | Conversation context (tokens) before rolling over to a text history. |
+| `MING_INT8_EXPERTS` | `auto` | Weight-only int8 for the MoE experts (`1`/`0`/`auto` = int8 below 23 GB VRAM). Measured vs bf16: identical greedy replies and transcripts on the test set, logit cosine ≥ 0.997, +2% NLL. |
+| `MING_VRAM_LIMIT_GB` | – | Cap PyTorch's VRAM use (to emulate a smaller card). |
 | `MING_CFM_STEPS` | `10` | Talker flow-matching steps (fewer is faster but degrades speech). |
 | `MING_FAST_TALKER` / `MING_GRAPHS` | `1` / `1` | Fused Triton Talker path / HIP graphs (set `0` to fall back to the reference code). |
 | `MING_TRACEMALLOC` | `0` | Python allocation tracing for `/api/debug/mem`. |

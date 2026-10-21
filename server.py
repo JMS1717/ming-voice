@@ -44,6 +44,10 @@ def _load():
     torch.set_grad_enabled(False)
     from silero_vad import load_silero_vad
 
+    if os.environ.get("MING_VRAM_LIMIT_GB"):  # emulate a smaller GPU (testing)
+        total = torch.cuda.get_device_properties(0).total_memory
+        torch.cuda.set_per_process_memory_fraction(min(1.0, float(os.environ["MING_VRAM_LIMIT_GB"]) * 2**30 / total))
+
 
     ENGINE["thinker"] = Thinker()  # load first: loading it after the Talker exceeds WSL's 15 GB RAM cap
     import gc

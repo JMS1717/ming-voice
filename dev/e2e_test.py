@@ -77,7 +77,7 @@ async def main():
                 events.put_nowait((time.perf_counter(), m))
         tasks = [asyncio.create_task(mic.run()), asyncio.create_task(recv())]
 
-        async def turn(name, audio, interrupt_with=None, interrupt_after=1.5, clear=True):
+        async def turn(name, audio, interrupt_with=None, interrupt_after=1.5, clear=True, settle=0.0):
             while clear and not events.empty():
                 events.get_nowait()
             mic.say(audio)
@@ -112,6 +112,10 @@ async def main():
                     saw_interrupt = True
                 elif ev["type"] == "done":
                     done = ev
+                    if settle > 0:  # keep collecting: the turn may have been split into several replies
+                        deadline = min(deadline, time.perf_counter() + settle)
+                        settle = 0.0
+                        continue
                     if interrupt_with is None or ev.get("interrupted"):
                         break
             audio = np.concatenate(pcm) if pcm else np.zeros(1, np.float32)
@@ -131,7 +135,7 @@ async def main():
         await asyncio.sleep(1.0)
         await turn("capital", load("capital"))
         await turn("followup", load("followup"))
-        await turn("pause", load("pause"))
+        await turn("pause", load("pause"), settle=6.0)
         await turn("sleep", load("sleep"))
         r = await turn("story_bargein", load("story"), interrupt_with=load("interrupt"))
         # the barge-in question's own reply follows the interrupted one

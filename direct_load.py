@@ -47,7 +47,10 @@ def prefetch(paths, workers=8, chunk=64 << 20):
         list(ex.map(read, jobs))
 
 
-def load_remote_model_direct(model_dir, device="cuda:0", dtype=torch.bfloat16, attn_impl="sdpa", workers=8):
+def load_remote_model_direct(model_dir, device="cuda:0", dtype=torch.bfloat16, attn_impl="sdpa", workers=8,
+                             special=None):
+    """special: optional fn(model) -> {checkpoint_key: fn(cpu_tensor)} for tensors that need custom handling
+    (e.g. quantize-on-load); those keys are routed to the hook instead of a parameter."""
     from transformers import AutoConfig, GenerationConfig
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
@@ -73,6 +76,7 @@ def load_remote_model_direct(model_dir, device="cuda:0", dtype=torch.bfloat16, a
 
     targets = dict(model.named_parameters())
     targets.update(dict(model.named_buffers()))
+    hooks = special(model) if special is not None else {}
     index = json.loads((model_dir / "model.safetensors.index.json").read_text())["weight_map"]
     jobs = []  # (file, abs_offset, nbytes, key, dtype, shape)
     unexpected = []
@@ -80,7 +84,7 @@ def load_remote_model_direct(model_dir, device="cuda:0", dtype=torch.bfloat16, a
         path = str(model_dir / fname)
         base, meta = _header(path)
         for k, info in meta.items():
-            if k not in targets:
+            if k not in targets and k not in hooks:
                 unexpected.append(k)
                 continue
             a, b = info["data_offsets"]
@@ -117,6 +121,11 @@ def load_remote_model_direct(model_dir, device="cuda:0", dtype=torch.bfloat16, a
                     while got < n:
                         got += os.preadv(fd, [mv[got:]], off + got)
                     src = torch.frombuffer(buf, dtype=dt).reshape(shape) if n else torch.empty(shape, dtype=dt)
+                    if k in hooks:
+                        hooks[k](src)
+                        with lock:
+                            loaded.add(k)
+                        continue
                     dst = targets[k]
                     if tuple(src.shape) != tuple(dst.shape):
                         raise ValueError(f"shape mismatch for {k}: {tuple(src.shape)} vs {tuple(dst.shape)}")
@@ -132,7 +141,7 @@ def load_remote_model_direct(model_dir, device="cuda:0", dtype=torch.bfloat16, a
         for f in [ex.submit(work, g) for g in groups]:
             f.result()
     torch.cuda.synchronize(device)
-    missing = [k for k in dict(model.named_parameters()) if k not in loaded]
+    missing = [k for k, p in model.named_parameters() if k not in loaded and p.device.type != "meta"]
     if missing:
         raise RuntimeError(f"{len(missing)} parameters missing from checkpoint, e.g. {missing[:5]}")
     try:

@@ -11,9 +11,9 @@ import triton.language as tl
 
 
 @triton.jit
-def _moe_gate_up(x_ptr, ids_ptr, wgu_ptr, a_ptr, H, I,
-                 s_we, s_wn,
-                 BN: tl.constexpr, BK: tl.constexpr):
+def _moe_gate_up(x_ptr, ids_ptr, wgu_ptr, sgu_ptr, a_ptr, H, I,
+                 s_we, s_wn, s_se,
+                 QUANT: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
     k = tl.program_id(0)
     pid_n = tl.program_id(1)
     e = tl.load(ids_ptr + k).to(tl.int64)
@@ -28,6 +28,9 @@ def _moe_gate_up(x_ptr, ids_ptr, wgu_ptr, a_ptr, H, I,
         wu = tl.load(base + (offs_n[:, None] + I) * s_wn + offs_k[None, :]).to(tl.float32)
         acc_g += tl.sum(wg * x[None, :], axis=1)
         acc_u += tl.sum(wu * x[None, :], axis=1)
+    if QUANT:  # int8 weights with one fp32 scale per output row
+        acc_g *= tl.load(sgu_ptr + e * s_se + offs_n)
+        acc_u *= tl.load(sgu_ptr + e * s_se + I + offs_n)
     # match the reference rounding: bf16 projections, bf16 silu, bf16 product
     g = acc_g.to(tl.bfloat16).to(tl.float32)
     u = acc_u.to(tl.bfloat16).to(tl.float32)
@@ -36,9 +39,9 @@ def _moe_gate_up(x_ptr, ids_ptr, wgu_ptr, a_ptr, H, I,
 
 
 @triton.jit
-def _moe_down(a_ptr, ids_ptr, w_ptr, wd_ptr, y_ptr, H, I, NK,
-              s_we, s_wn,
-              BN: tl.constexpr, BK: tl.constexpr):
+def _moe_down(a_ptr, ids_ptr, w_ptr, wd_ptr, sd_ptr, y_ptr, H, I, NK,
+              s_we, s_wn, s_se,
+              QUANT: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
     pid_n = tl.program_id(0)
     offs_n = pid_n * BN + tl.arange(0, BN)
     acc = tl.zeros((BN,), dtype=tl.float32)
@@ -52,6 +55,8 @@ def _moe_down(a_ptr, ids_ptr, w_ptr, wd_ptr, y_ptr, H, I, NK,
             a = tl.load(a_ptr + k * I + offs_i).to(tl.float32)
             w = tl.load(base + offs_n[:, None] * s_wn + offs_i[None, :]).to(tl.float32)
             part += tl.sum(w * a[None, :], axis=1)
+        if QUANT:
+            part *= tl.load(sd_ptr + e * s_se + offs_n)
         acc += wk * part.to(tl.bfloat16).to(tl.float32)
     tl.store(y_ptr + offs_n, acc.to(tl.bfloat16))
 
@@ -59,19 +64,31 @@ def _moe_down(a_ptr, ids_ptr, w_ptr, wd_ptr, y_ptr, H, I, NK,
 CFG = dict(A=dict(BN=16, BK=256, num_warps=4), B=dict(BN=16, BK=256, num_warps=4))
 
 
-def fused_moe_decode(x, w_gu, w_d, ids, weights, a_buf=None, out=None):
-    """x: [1, H] bf16; ids: [NK] int; weights: [NK] fp32 (shared expert weight 1.0 included)."""
+def fused_moe_decode(x, w_gu, w_d, ids, weights, a_buf=None, out=None, s_gu=None, s_d=None):
+    """x: [1, H] bf16; ids: [NK] int; weights: [NK] fp32 (shared expert weight 1.0 included).
+    w_gu/w_d are bf16, or int8 with per-output-row fp32 scales s_gu [E+1, 2I] / s_d [E+1, H]."""
     H = x.shape[-1]
     I = w_d.shape[-1]
     NK = ids.shape[0]
+    quant = s_gu is not None
     a = torch.empty(NK, I, device=x.device, dtype=torch.bfloat16) if a_buf is None else a_buf
     y = torch.empty(1, H, device=x.device, dtype=torch.bfloat16) if out is None else out
     ca, cb = CFG["A"], CFG["B"]
-    _moe_gate_up[(NK, I // ca["BN"])](x, ids, w_gu, a, H, I, w_gu.stride(0), w_gu.stride(1),
-                                     BN=ca["BN"], BK=ca["BK"], num_warps=ca["num_warps"])
-    _moe_down[(H // cb["BN"],)](a, ids, weights, w_d, y, H, I, NK, w_d.stride(0), w_d.stride(1),
-                               BN=cb["BN"], BK=cb["BK"], num_warps=cb["num_warps"])
+    _moe_gate_up[(NK, I // ca["BN"])](x, ids, w_gu, s_gu if quant else w_gu, a, H, I,
+                                     w_gu.stride(0), w_gu.stride(1), s_gu.stride(0) if quant else 0,
+                                     QUANT=quant, BN=ca["BN"], BK=ca["BK"], num_warps=ca["num_warps"])
+    _moe_down[(H // cb["BN"],)](a, ids, weights, w_d, s_d if quant else w_d, y, H, I, NK,
+                               w_d.stride(0), w_d.stride(1), s_d.stride(0) if quant else 0,
+                               QUANT=quant, BN=cb["BN"], BK=cb["BK"], num_warps=cb["num_warps"])
     return y
+
+
+def quantize_rows_int8(w):
+    """Symmetric per-output-row int8: w [..., N, K] -> (int8 [..., N, K], fp32 scales [..., N])."""
+    amax = w.abs().amax(dim=-1).float().clamp_min(1e-8)
+    scale = amax / 127.0
+    q = torch.round(w.float() / scale[..., None]).clamp_(-127, 127).to(torch.int8)
+    return q, scale
 
 
 def _graph_us(fn, reps=50, inner=20):

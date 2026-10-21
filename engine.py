@@ -18,6 +18,8 @@ from pathlib import Path
 os.environ.setdefault("HSA_ENABLE_DXG_DETECTION", "1")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+# Encode >30 s inputs one 30 s Whisper chunk at a time (lower peak VRAM; same result).
+os.environ.setdefault("HF_SFT_WHISPER_MICRO_BATCH", "1")
 
 import numpy as np
 import torch
@@ -77,6 +79,33 @@ class GpuKeepAwake(threading.Thread):
 # --------------------------------------------------------------------------- Thinker
 
 
+_PRESTACK_INT8 = [False]
+
+
+def _int8_expert_loaders(model):
+    """Loader hooks: checkpoint key -> fn(cpu_tensor) quantizing that expert matrix into the int8 buffers."""
+    from fused_moe import quantize_rows_int8
+
+    def into(q, s, e, off):
+        def fn(src):
+            qq, ss = quantize_rows_int8(src.to(DEVICE))
+            q[e, off:off + qq.shape[0]].copy_(qq)
+            s[e, off:off + qq.shape[0]].copy_(ss)
+        return fn
+
+    hooks = {}
+    for name, m in model.named_modules():
+        if type(m).__name__ != "BailingMoeV3SparseMoeBlock" or getattr(m, "q_gu", None) is None:
+            continue
+        I = m.config.moe_intermediate_size
+        for e in range(m.config.num_experts):
+            p = f"{name}.experts.{e}."
+            hooks[p + "gate_proj.weight"] = into(m.q_gu, m.s_gu, e, 0)
+            hooks[p + "up_proj.weight"] = into(m.q_gu, m.s_gu, e, I)
+            hooks[p + "down_proj.weight"] = into(m.q_d, m.s_d, e, 0)
+    return hooks
+
+
 def _prestack_experts(model_dir):
     """Make the MoE blocks allocate their routed experts as views into stacked [E+1, ...] tensors at
     construction time, so checkpoint tensors load straight into the layout the fused kernels use
@@ -100,6 +129,13 @@ def _prestack_experts(model_dir):
             orig(self)
         E, H = self.config.num_experts, self.config.hidden_size
         I = self.config.moe_intermediate_size
+        if _PRESTACK_INT8[0]:  # int8 buffers only; the loader quantizes expert tensors as it reads them
+            self.q_gu = torch.empty(E + 1, 2 * I, H, dtype=torch.int8)
+            self.q_d = torch.empty(E + 1, H, I, dtype=torch.int8)
+            self.s_gu = torch.empty(E + 1, 2 * I, dtype=torch.float32)
+            self.s_d = torch.empty(E + 1, H, dtype=torch.float32)
+            self.w_gu = self.w_d = None
+            return  # expert params stay on the meta device
         self.w_gu = torch.empty(E + 1, 2 * I, H)  # device/dtype from the surrounding build context
         self.w_d = torch.empty(E + 1, H, I)
         for e, ex in enumerate(self.experts):
@@ -140,6 +176,12 @@ def _patch_moe(model):
         experts = module.experts
         E = len(experts)
         I, H = experts[0].gate_proj.weight.shape
+        if getattr(module, "q_gu", None) is not None and getattr(module, "w_gu", None) is None:
+            module.inter = I  # int8 at load time: forward is installed by _quantize_moe_int8
+            module.shared_id = torch.tensor([E], device=DEVICE)
+            module.one = torch.ones(1, device=DEVICE, dtype=torch.float32)
+            n += 1
+            continue
         shared = module.shared_experts
         assert shared is not None and shared.gate_proj.weight.shape == (I, H)
         if getattr(module, "w_gu", None) is not None:  # pre-stacked at construction (see _prestack_experts)
@@ -176,6 +218,100 @@ def _patch_moe(model):
         module.forward = MethodType(forward, module)
         n += 1
     torch.cuda.empty_cache()
+    return n
+
+
+def _quantize_moe_int8(model):
+    """Weight-only int8 (per-output-row scales) for all routed + shared experts, in place, layer by layer.
+    Halves expert VRAM (~14 GB -> ~7 GB) and speeds up the bandwidth-bound decode kernel. Single-token
+    steps use the int8 fused kernels; multi-token (prefill) passes dequantize the layer into a shared
+    bf16 scratch buffer and run the reference per-expert loop."""
+    from types import MethodType
+
+    from fused_moe import fused_moe_decode, quantize_rows_int8
+
+    n = 0
+    for module in model.modules():
+        if type(module).__name__ != "BailingMoeV3SparseMoeBlock" or not hasattr(module, "shared_id"):
+            continue
+        if getattr(module, "w_gu", None) is None:  # quantized while loading: add the shared expert (slot E)
+            q_gu, q_d, s_gu, s_d = module.q_gu, module.q_d, module.s_gu, module.s_d
+            E1, I = q_gu.shape[0], module.inter
+            sh = module.shared_experts
+            with torch.no_grad():
+                for w, q, s, off in ((sh.gate_proj.weight, q_gu, s_gu, 0), (sh.up_proj.weight, q_gu, s_gu, I),
+                                     (sh.down_proj.weight, q_d, s_d, 0)):
+                    qq, ss = quantize_rows_int8(w)
+                    q[E1 - 1, off:off + qq.shape[0]].copy_(qq)
+                    s[E1 - 1, off:off + qq.shape[0]].copy_(ss)
+        else:
+            w_gu, w_d = module.w_gu, module.w_d
+            E1 = w_gu.shape[0]
+            q_gu = torch.empty(w_gu.shape, dtype=torch.int8, device=DEVICE)
+            q_d = torch.empty(w_d.shape, dtype=torch.int8, device=DEVICE)
+            s_gu = torch.empty(w_gu.shape[:2], dtype=torch.float32, device=DEVICE)
+            s_d = torch.empty(w_d.shape[:2], dtype=torch.float32, device=DEVICE)
+            with torch.no_grad():
+                for i in range(0, E1, 16):  # chunked to bound the fp32 temporaries
+                    q_gu[i:i + 16], s_gu[i:i + 16] = quantize_rows_int8(w_gu[i:i + 16])
+                    q_d[i:i + 16], s_d[i:i + 16] = quantize_rows_int8(w_d[i:i + 16])
+            del w_gu, w_d
+        # drop every reference to bf16 expert weights (the routed ones were views into the stacks)
+        module.experts = torch.nn.ModuleList()
+        module.shared_experts = None
+        module.w_gu = module.w_d = None
+        module.q_gu, module.q_d, module.s_gu, module.s_d = q_gu, q_d, s_gu, s_d
+        module.n_routed = E1 - 1
+
+        def forward(self, hidden_states):
+            bsz, seq_len, h = hidden_states.shape
+            topk_idx, topk_weight, router_logits = self.gate(hidden_states)
+            aux = (router_logits.view(bsz, seq_len, -1), topk_idx.view(bsz, seq_len, -1))
+            if bsz * seq_len == 1:
+                ids = torch.cat([topk_idx.view(-1), self.shared_id])
+                wts = torch.cat([topk_weight.view(-1).float(), self.one])
+                y = fused_moe_decode(hidden_states.view(1, h), self.q_gu, self.q_d, ids, wts,
+                                     s_gu=self.s_gu, s_d=self.s_d)
+                return y.view(bsz, seq_len, h), aux
+            return self._prefill(hidden_states.view(-1, h), topk_idx, topk_weight).view(bsz, seq_len, h), aux
+
+        def _prefill(self, x, topk_idx, topk_weight):
+            N, K = topk_idx.shape
+            E1, I = self.q_gu.shape[0], self.inter
+            ids = torch.cat([topk_idx, torch.full((N, 1), E1 - 1, device=x.device, dtype=topk_idx.dtype)], 1)
+            wts = torch.cat([topk_weight.float(), torch.ones(N, 1, device=x.device)], 1)
+            flat = ids.reshape(-1)
+            order = flat.argsort()
+            counts = torch.bincount(flat, minlength=E1).cpu().tolist()
+            tok = order // (K + 1)
+            xs = x[tok]
+            out = torch.empty(xs.shape[0], x.shape[1], device=x.device, dtype=x.dtype)
+            starts = [0]
+            for c in counts:
+                starts.append(starts[-1] + c)
+            CH = 16  # dequantize a few experts at a time (bounded scratch, skips unused ones)
+            for c0 in range(0, E1, CH):
+                c1 = min(E1, c0 + CH)
+                if starts[c1] == starts[c0]:
+                    continue
+                d_gu = (self.q_gu[c0:c1].half() * self.s_gu[c0:c1, :, None].half()).to(DTYPE)
+                d_d = (self.q_d[c0:c1].half() * self.s_d[c0:c1, :, None].half()).to(DTYPE)
+                for e in range(c0, c1):
+                    if counts[e] == 0:
+                        continue
+                    seg = xs[starts[e]:starts[e + 1]]
+                    gu = F.linear(seg, d_gu[e - c0])
+                    a = F.silu(gu[:, :I]) * gu[:, I:]
+                    out[starts[e]:starts[e + 1]] = F.linear(a, d_d[e - c0])
+                del d_gu, d_d
+            y = torch.zeros(N, x.shape[1], device=x.device, dtype=torch.float32)
+            y.index_add_(0, tok, out.float() * wts.reshape(-1)[order][:, None])
+            return y.to(x.dtype)
+
+        module.forward = MethodType(forward, module)
+        module._prefill = MethodType(_prefill, module)
+        torch.cuda.empty_cache()
+        n += 1
     return n
 
 
@@ -239,7 +375,19 @@ def _make_static_cache_class():
     return StaticHybridCache
 
 
+def _want_int8_experts() -> bool:
+    """MING_INT8_EXPERTS=1/0/auto (default auto: int8 when the GPU has < 23 GiB, i.e. 16-20 GB cards)."""
+    v = os.environ.get("MING_INT8_EXPERTS", "auto").lower()
+    if v in ("1", "true", "yes"):
+        return True
+    if v in ("0", "false", "no"):
+        return False
+    return torch.cuda.get_device_properties(DEVICE).total_memory < 23 * 2**30
+
+
 class Thinker:
+    int8_experts = None
+
     def __init__(self, model_dir: Path = MODEL_DIR, system_prompt: str = DEFAULT_SYSTEM_PROMPT,
                  use_graphs: bool = True):
         from transformers import AutoModelForCausalLM, AutoProcessor
@@ -256,20 +404,28 @@ class Thinker:
             ).eval()
         else:  # stream weights straight to the GPU (HF's loader peaks at ~14.6 GiB host RAM -> swap)
             from direct_load import load_remote_model_direct
+            _PRESTACK_INT8[0] = self.int8_experts = _want_int8_experts()
             _prestack_experts(model_dir)
-            self.model, info = load_remote_model_direct(model_dir, device=str(DEVICE), dtype=DTYPE)
+            self.model, info = load_remote_model_direct(
+                model_dir, device=str(DEVICE), dtype=DTYPE,
+                special=_int8_expert_loaders if self.int8_experts else None)
             log(f"thinker weights: build {info['build_s']}s, read+upload {info['gb']} GB in {info['load_s']}s")
             if info["unexpected"]:
                 log(f"thinker load: {info['unexpected']} unused checkpoint tensors, e.g. {info['unexpected_examples']}")
         t_w = time.time()
         n = _patch_moe(self.model)
+        if getattr(self, "int8_experts", None) is None:
+            self.int8_experts = _want_int8_experts()
+        if self.int8_experts:
+            _quantize_moe_int8(self.model)
         t_p = time.time()
         import whisper
 
         self._mel = whisper.log_mel_spectrogram
         self.n_mels = getattr(self.model.config.audio_config, "n_mels", 128)
         self.system_prompt = system_prompt
-        self.max_ctx = int(os.environ.get("MING_MAX_CTX", "8192"))
+        # smaller default context in low-VRAM (int8) mode: the MLA cache is ~60 MB per 1k tokens
+        self.max_ctx = int(os.environ.get("MING_MAX_CTX", "4096" if self.int8_experts else "8192"))
         self._build_cache()
         self.graph = None
         self.reset()
