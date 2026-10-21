@@ -79,6 +79,17 @@ you're done: it holds ~20 GB of VRAM and keeps the GPU out of its deepest idle s
 | Voice detection sensitivity | 0.50 | Silero VAD threshold. |
 | Playback buffer | 100 ms | Client jitter buffer. |
 
+### Configuration (environment variables for `run.sh`)
+
+| Variable | Default | |
+|---|---|---|
+| `HOST` / `PORT` | `127.0.0.1` / `8000` | Bind address. The server is local-only by default; `HOST=0.0.0.0` exposes it on your network (browsers only allow the microphone on `localhost` or HTTPS). |
+| `MING_MODEL_DIR` | `./model` | Model folder. |
+| `MING_MAX_CTX` | `8192` | Conversation context (tokens) before rolling over to a text history. |
+| `MING_CFM_STEPS` | `10` | Talker flow-matching steps (fewer is faster but degrades speech). |
+| `MING_FAST_TALKER` / `MING_GRAPHS` | `1` / `1` | Fused Triton Talker path / HIP graphs (set `0` to fall back to the reference code). |
+| `MING_TRACEMALLOC` | `0` | Python allocation tracing for `/api/debug/mem`. |
+
 ## How it works
 
 ```

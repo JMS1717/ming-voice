@@ -670,5 +670,6 @@ if __name__ == "__main__":
     if os.environ.get("MING_TRACEMALLOC") == "1":
         import tracemalloc
         tracemalloc.start(8)
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8000")), log_level="warning",
+    # Local-only by default (the API accepts audio uploads and drives the GPU); HOST=0.0.0.0 to share on the LAN.
+    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "8000")), log_level="warning",
                 ws_max_size=2**24, ws_ping_interval=None, ws_ping_timeout=None)
