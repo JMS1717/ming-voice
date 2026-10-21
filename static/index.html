@@ -9,7 +9,7 @@
 <link rel="apple-touch-icon" href="/icon.svg">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#14171e" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
 <style>
   :root {
@@ -18,14 +18,22 @@
     --listen: #1e9e5a; --hear: #d48a0b; --think: #3866d6; --speak: #c2410c; --off: #a3a39c; --danger: #c0392b;
     --user: #e9eefb; --bot: #f1f1ed; --shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 16px rgba(0,0,0,.05);
   }
+  :root { color-scheme: light dark; --glow: transparent; }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #121211; --panel: #1b1b1a; --panel-2: #20201e; --text: #ececea; --muted: #a2a29b; --faint: #74746e;
-      --line: #2d2d2a; --accent: #7aa2f7; --accent-ink: #0d1424; --accent-soft: #1d2740;
-      --listen: #3fcf80; --hear: #f2b13c; --think: #7aa2f7; --speak: #f2804c; --off: #5c5c57; --danger: #ef6b5b;
-      --user: #1d2638; --bot: #242422; --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.25);
+      --bg: #0d0f14; --panel: #14171e; --panel-2: #1a1e27; --text: #e9ebf1; --muted: #9ba2b3; --faint: #687083;
+      --line: #252a35; --accent: #7f9cff; --accent-ink: #0a0f1f; --accent-soft: #1b2442;
+      --listen: #34d399; --hear: #fbbf24; --think: #8b9dff; --speak: #fb8b5b; --off: #4b5366; --danger: #f87171;
+      --user: #1f2a4a; --bot: #191d26; --shadow: 0 1px 2px rgba(0,0,0,.35), 0 8px 24px rgba(0,0,0,.3);
+      --glow: rgba(127,156,255,.09);
     }
+    .msg.user { background: linear-gradient(160deg, #24315a, #1c2645); border: 1px solid #2c3a66; }
+    .msg.bot { border: 1px solid var(--line); }
+    .stat, .pill { background: var(--panel-2); }
+    .btn.primary { box-shadow: 0 4px 18px rgba(127,156,255,.25); }
+    header { background: rgba(20,23,30,.92); }
   }
+  .hero { background: radial-gradient(ellipse 60% 75% at 50% 32%, var(--glow), transparent 70%); }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
   body { background: var(--bg); color: var(--text); font: 14.5px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
@@ -254,7 +262,7 @@
       <label class="check"><input type="checkbox" id="barge" checked> Interrupt the assistant by talking (barge-in)</label>
       <label class="check" title="The server compares what the microphone hears with what it just played, so the assistant's own voice coming out of a speaker doesn't count as you talking. Turn off only if it ignores you when you talk over it."><input type="checkbox" id="echo" checked> Ignore the assistant's own voice (speakerphone echo)</label>
       <label class="check" title="The assistant can search the web (DuckDuckGo), check the weather (Open-Meteo), calculate and tell the time. Only the search terms leave this computer, never your voice."><input type="checkbox" id="tools" checked> Web search &amp; tools (weather, timers, calculator, smart home)</label>
-      <div class="field"><span>Your location (for the weather)</span><input id="home" type="text" placeholder="e.g. Seattle, WA" autocomplete="off"></div>
+      <div class="field"><span>Your location (for the weather)</span><input id="home" type="text" placeholder="e.g. Paris, France" autocomplete="off"></div>
 
       <h3>Timing</h3>
       <label class="check" title="A small model listens to how you said it (words and intonation) and answers sooner when you've clearly finished, or waits longer (up to 1.5 s) when you sound mid-sentence."><input type="checkbox" id="smart" checked> Smart turn detection</label>
@@ -853,6 +861,7 @@ document.addEventListener('keyup', (e) => { if (e.code === 'Space') pttUp(); });
 // ---------------------------------------------------------------- orb + meters
 const orb = $('orb'), g2 = orb.getContext('2d');
 const outBuf = new Uint8Array(256);
+const darkQuery = matchMedia('(prefers-color-scheme: dark)');
 function cssVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
 let phase = 0, smooth = 0;
 function draw() {
@@ -877,9 +886,12 @@ function draw() {
     g2.fillStyle = c; g2.globalAlpha = 0.07 * (4 - i) * (0.5 + smooth); g2.fill();
   }
   g2.globalAlpha = 1;
+  const dark = darkQuery.matches;
   const grad = g2.createRadialGradient(cx - r * 0.3, cy - r * 0.35, r * 0.1, cx, cy, r);
-  grad.addColorStop(0, '#ffffff'); grad.addColorStop(0.25, c); grad.addColorStop(1, c);
+  grad.addColorStop(0, dark ? 'rgba(255,255,255,.75)' : '#ffffff'); grad.addColorStop(0.3, c); grad.addColorStop(1, c);
+  g2.shadowColor = c; g2.shadowBlur = dark ? 36 + smooth * 30 : 0;  // (a glow on dark backgrounds)
   g2.beginPath(); g2.arc(cx, cy, r, 0, Math.PI * 2); g2.fillStyle = grad; g2.fill();
+  g2.shadowBlur = 0;
   if (state === 'thinking') {
     g2.strokeStyle = c; g2.lineWidth = 5; g2.lineCap = 'round'; g2.beginPath();
     g2.arc(cx, cy, r * 1.25, phase, phase + Math.PI * 0.6); g2.stroke();

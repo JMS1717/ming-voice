@@ -79,7 +79,7 @@ async def main():
     audio = [speech(q) for q, _, _ in CASES]  # (before connecting: TTS while the session waits would be slow)
     async with websockets.connect(f"ws://{URL}/ws", max_size=2**24) as ws:
         json.loads(await ws.recv())  # hello
-        await ws.send(json.dumps({"type": "config", "mode": "ptt", "tools": True, "home": "Seattle, WA",
+        await ws.send(json.dumps({"type": "config", "mode": "ptt", "tools": True, "home": "Chicago, IL",
                                   "voice": "US_Stella"}))
         await ws.send(json.dumps({"type": "reset"}))
         await asyncio.sleep(1.0)

@@ -185,12 +185,12 @@ async def main():
     offered = Toolbox().names  # (Home Assistant / Hermes only when configured on this machine)
     async with websockets.connect(f"ws://{URL}/ws", max_size=2**24) as ws:
         json.loads(await ws.recv())  # hello
-        await ws.send(json.dumps({"type": "config", "tools": True, "home": "Seattle, WA", "voice": "US_Stella"}))
+        await ws.send(json.dumps({"type": "config", "tools": True, "home": "Chicago, IL", "voice": "US_Stella"}))
         await ws.send(json.dumps({"type": "reset"}))
         await asyncio.sleep(1.0)
         cases = [  # (question, tool expected or None, words the answer should contain (any))
             ("What is the capital of France?", None, ["paris"]),
-            ("What will the weather be like tomorrow?", "get_weather", ["tomorrow", "°", "degree"]),  # home: Seattle
+            ("What will the weather be like tomorrow?", "get_weather", ["tomorrow", "°", "degree"]),  # home: Chicago
             ("What's the weather like in Chicago right now?", "get_weather", ["°", "degree", "chicago"]),
             ("What is 1234 times 5678?", "calculate", ["7006652", "7,006,652", "seven million"]),
             ("What's the latest news about NASA?", "web_search", []),
