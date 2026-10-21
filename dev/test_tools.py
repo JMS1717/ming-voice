@@ -40,7 +40,35 @@ for expr, want in (("17*23", "391"), ("2^10", "1024"), ("15% of 80", "12"), ("sq
     check(calculate(expr)[0].endswith("= " + want), f"calculate {expr} = {want}")
 check(calculate("__import__('os')")[0].startswith("Error"), "calculator refuses code")
 check(calculate("9**9**9")[0].startswith("Error"), "calculator refuses huge powers")
+import datetime as dt  # noqa: E402
+from tools import parse_when, spoken_duration  # noqa: E402
+now = dt.datetime(2026, 10, 21, 17, 0).astimezone()  # a Wednesday, 5 pm
+for when, want in (("10 minutes", "17:10"), ("an hour and a half", "18:30"), ("half an hour", "17:30"),
+                   ("90 seconds", "17:01:30"), ("twenty five minutes", "17:25"), ("1 hour 15 minutes", "18:15"),
+                   ("2 and a half minutes", "17:02:30"), ("10", "17:10"), ("at 5:30 pm", "17:30"),
+                   ("at 9 am", "Thu 09:00"), ("tomorrow at 9am", "Thu 09:00"), ("7:30", "19:30"),
+                   ("noon", "Thu 12:00"), ("friday at 8 p.m.", "Fri 20:00"), ("in a few minutes", "17:03")):
+    got = parse_when(when, now)
+    fmt = "%a %H:%M" if " " in want else "%H:%M:%S" if want.count(":") == 2 else "%H:%M"
+    check(got is not None and got[0].strftime(fmt) == want, f"parse_when {when!r} -> {want} (got {got and got[0].strftime(fmt)})")
+check(parse_when("whenever", now) is None, "parse_when rejects nonsense")
+check(spoken_duration(5400) == "1 hour and 30 minutes", "spoken duration")
+from tools import reminder_text  # noqa: E402
+for msg, want in (("Remind me to stretch", ("stretch", "Time to stretch.")), ("A 10-minute timer is set.", ("", "")),
+                  ("pasta", ("pasta", "Reminder: pasta.")), ("", ("", "")), ("timer for 5 minutes", ("", ""))):
+    check(reminder_text(msg) == want, f"reminder_text {msg!r} -> {want} (got {reminder_text(msg)})")
 tb = Toolbox()
+tb.timers.path = tb.timers.path.with_name(".timers.test.json")  # (don't touch real timers)
+tb.timers.items = []
+r = tb.run("timer", {"action": "set", "when": "10 minutes"})
+check(r[1].get("say") == "Okay, timer set for 10 minutes.", f"set a timer: {r}")
+r = tb.run("timer", {"action": "set", "when": "at 11:59 pm", "message": "take out the trash"})
+check("remind you at 11:59 PM" in r[1].get("say", ""), f"set a reminder: {r}")
+check("take out the trash" in tb.run("timer", {"action": "list"})[0], "list timers")
+check(tb.run("timer", {"action": "cancel", "message": "the trash reminder"})[0] == "Cancelled 1." and
+      len(tb.timers.items) == 1 and tb.timers.items[0]["duration"], "cancel by name keeps the other one")
+check(tb.run("timer", {"action": "cancel", "message": "all"})[0] == "Cancelled 1." and not tb.timers.items, "cancel all")
+tb.timers.path.unlink(missing_ok=True)
 check(tb.run("rm_rf", {})[0].startswith("Error"), "unknown tool -> error text, no exception")
 check(tb.run("calculate", {"nope": 1})[0].startswith("Error"), "bad arguments -> error text, no exception")
 
@@ -94,6 +122,8 @@ async def main():
             ("What's the latest news about NASA?", "web_search", []),
             ("Tell me a short joke.", None, []),
             ("What time is it?", "get_current_time", []),
+            ("Set a timer for 10 minutes.", "timer", ["10 minutes", "ten minutes"]),
+            ("Actually, cancel that timer.", "timer", ["cancel"]),
         ]
         if "home_assistant" in offered:  # read-only: nothing gets switched
             cases.append(("Is the kitchen light on?", "home_assistant", ["kitchen", "off", " on"]))
@@ -102,7 +132,7 @@ async def main():
         if "--hermes" in sys.argv:  # only the delegation check
             cases = []
         if "--home" in sys.argv:  # only the Home Assistant / Jellyfin checks (then Hermes)
-            cases = cases[7:]
+            cases = cases[9:]
         for q, want_tool, words in cases:
             r = await ask(ws, q)
             names = [t["name"] for t in r["tools"]]
@@ -118,6 +148,16 @@ async def main():
                 check(any(w in ans.lower() for w in words), f"{q!r} answer mentions one of {words}")
             check(r["audio_s"] > 0.5, f"{q!r} was spoken")
             check(not URLISH.search(ans), f"{q!r} answer has no URLs or citation numbers")
+        if "--home" not in sys.argv and "--hermes" not in sys.argv:  # a timer that really goes off
+            r = await ask(ws, "Remind me to stretch in 5 seconds.")
+            print(f"\nQ: 5 s reminder\n   tools: {[(t['name'], t.get('args')) for t in r['tools']]}\n   A: {r['text'].strip()!r}")
+            check("timer" in [t["name"] for t in r["tools"]], "the reminder calls timer")
+            t0 = time.perf_counter()
+            r = await ask(ws, None, timeout=30)
+            names = [t["name"] for t in r["tools"]]
+            print(f"   announced after {time.perf_counter() - t0:.0f} s: {r['text'].strip()!r} {names}")
+            check("timer_done" in names and "stretch" in r["text"].lower() and r["audio_s"] > 0.5,
+                  "the reminder goes off and is spoken")
         if "ask_hermes" in offered:  # a real (harmless) task for the Hermes agent; its answer arrives on its own
             await asyncio.sleep(1.0)
             r = await ask(ws, "Can you ask Hermes how long its server has been up?")

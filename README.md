@@ -5,7 +5,8 @@ Low-latency, fully local **speech-to-speech** voice assistant built on
 **AMD Radeon GPU** (ROCm 7.2 inside WSL2 on Windows). Talk to it in the browser; it answers out loud,
 typically starting to speak **~0.25 s after you stop talking**.
 
-* Hands-free conversation with voice activity detection, or push-to-talk
+* Hands-free conversation with voice activity detection, push-to-talk, or **wake word** ("Hey Ming, ...") for an
+  always-listening device, with a follow-up window so a conversation doesn't need it every time
 * **Smart turn detection** ([Smart Turn v3](https://huggingface.co/pipecat-ai/smart-turn-v3)): judges from your
   words and intonation whether you've finished, answering sooner when you have and waiting when you're mid-sentence
 * **Speculative turn-taking**: the reply starts generating during your pause and is discarded if you keep talking
@@ -19,13 +20,14 @@ typically starting to speak **~0.25 s after you stop talking**.
 * Browser client: mic / speaker selection, live levels, transcript with replay & download, personas, settings
 * **Use it from your phone** over HTTPS on your home network (QR code, access key, installable web app)
 * **OpenAI-compatible API**: text-to-speech, transcription, chat with audio in and out
-* **Tools**: web search, weather, calculator and clock out of the box; **Home Assistant** (lights, plugs, media,
-  thermostat, ...) and delegation to a **Hermes Agent** for bigger jobs when configured. The model itself decides
-  when to call them (Ming-3.0's LLM was trained for function calling)
+* **Tools**: web search, weather, calculator, clock, **timers and reminders** out of the box; **Home Assistant**
+  (lights, plugs, media, thermostat, ...), **Jellyfin** and delegation to a **Hermes Agent** for bigger jobs when
+  configured. The model itself decides when to call them (Ming-3.0's LLM was trained for function calling)
 * English and Chinese (the model's languages)
 
 Everything runs locally; no audio leaves the machine. With tools on, only the search terms / place names go to
-DuckDuckGo and Open-Meteo (turn tools off in Settings to keep everything offline).
+DuckDuckGo (or Brave Search, if you add a key) and Open-Meteo (turn tools off in Settings to keep everything
+offline).
 
 ## Performance (RX 7900 XTX, 24 GB)
 
@@ -69,6 +71,9 @@ bash setup_env.sh                          # Python env (ROCm PyTorch wheels) + 
   models, and opens <http://localhost:8000>. Make a shortcut to it for your Desktop.
 * **WSL shell:** `./run.sh`, then open <http://localhost:8000>.
 
+To start it whenever you sign in to Windows (an always-on assistant), run
+`powershell -ExecutionPolicy Bypass -File windows\install_autostart.ps1` once (`-Remove` undoes it).
+
 Keep the server window open while you use it — WSL shuts its VM down when nothing is attached. Close it when
 you're done: it holds ~20 GB of VRAM and keeps the GPU out of its deepest idle state (see Troubleshooting).
 
@@ -79,6 +84,12 @@ you're done: it holds ~20 GB of VRAM and keeps the GPU out of its deepest idle s
   through the mic. If it still interrupts itself in a very echoey room, turn **barge-in** off in Settings.
 * Shortcuts: <kbd>Space</kbd> hold to talk (push-to-talk mode), <kbd>M</kbd> mute, <kbd>Esc</kbd> stop reply,
   <kbd>N</kbd> new conversation.
+* **Wake word** (Settings → Turn-taking): for a PC, tablet or old phone that stays on and listens all the time.
+  It only answers speech that starts with its name: "Hey Ming, turn off the lamp", or "Hey Ming" on its own and
+  wait for the chime. For a few seconds after each reply (8 s by default) you can follow up without the name.
+  The name is checked by transcribing the first 1.6 s of each utterance while you're still talking, so answers
+  are as quick as in hands-free mode; any name works (set it in Settings), "Ming" is recognised best. Timer
+  alarms and Hermes results are announced whether it's asleep or not.
 * **Clone a voice** in the sidebar: record or upload 5–15 s of one person speaking. Voices are saved in
   `voices/`.
 
@@ -99,21 +110,22 @@ server), press **Phone** in the app on the PC, and scan the QR code. The phone o
 * Add the page to your home screen to use it like an app; the screen stays on during a conversation.
 * One device talks to the assistant at a time: opening it on the phone takes over from the PC tab.
 
-### Tools: web search, weather, Home Assistant, Jellyfin, Hermes
+### Tools: web search, weather, timers, Home Assistant, Jellyfin, Hermes
 
 With **Web search & tools** on (Settings, default), the assistant can call tools while it answers. It says
 "Let me look that up" while a slow one runs, and the reply shows what it looked up and the sources.
 
 | Tool | What it does | Needs |
 |---|---|---|
-| `web_search` | News, prices, scores, recent events (DuckDuckGo, no key) | – |
+| `web_search` | News, prices, scores, recent events (DuckDuckGo, no key; with a Brave key, Brave Search for web results, which are fresher, and DuckDuckGo as the fallback) | optional `.brave_key` or `MING_BRAVE_KEY` ([Brave Search API](https://brave.com/search/api/), free tier) |
 | `get_weather` | Current weather and 3-day forecast (Open-Meteo, no key); "Your location" in Settings is the default | – |
 | `calculate`, `get_current_time` | Exact arithmetic, the date and time | – |
+| `timer` | "Set a timer for 10 minutes", "remind me to call mom at 5 pm", "how long is left?", "cancel the pasta timer". When one goes off the page chimes and says it (*"Time to call mom."*); kept in `.timers.json`, so they survive a restart, and one that went off while the server was down is announced late rather than lost | – |
 | `home_assistant` | "Turn off the kitchen lights", "is the car locked?": passed to Home Assistant's own Assist intent handling, so device names, aliases and areas work as in HA, and **only entities exposed to voice assistants in HA** can be touched | `.ha_token` (a long-lived access token: HA → your profile → Security), `.ha_url` or `MING_HA_URL` (default `http://homeassistant.local:8123`) |
 | `jellyfin` | "Play The Office on the TV", "pause", "what's playing?", "do I have Dune?": searches your library and remote-controls open Jellyfin players (a series continues from the next unwatched episode) | `.jellyfin.json`: `{"url": "http://<host>:8096", "key": "<API key>"}` (Jellyfin → Dashboard → API Keys) |
 | `ask_hermes` | Hands bigger jobs (research, your files and accounts, reminders, multi-step work) to a [Hermes Agent](https://github.com/NousResearch/hermes-agent) in the background; the answer is announced when it's ready, even if you've moved on | `.hermes.json`: `{"url": "http://<host>:8642", "key": "<API_SERVER_KEY>"}` (Hermes: `API_SERVER_ENABLED=true`, `API_SERVER_KEY`, `API_SERVER_HOST` in `~/.hermes/.env`) |
 
-Tools that change something (Home Assistant, Jellyfin, Hermes) never run for a speculative reply: they wait until your
+Tools that change something (timers, Home Assistant, Jellyfin, Hermes) never run for a speculative reply: they wait until your
 turn has really ended, so a pause mid-sentence can't switch a light. Files are read at server start.
 
 ### API

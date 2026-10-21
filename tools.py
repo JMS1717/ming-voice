@@ -2,13 +2,15 @@
 
 The thinker (Ming-3.0's Bailing LLM) was trained for function calling: given the function signatures in its system
 prompt it emits <tool_call>name<arg_key>..</arg_key><arg_value>..</arg_value></tool_call> instead of an answer, and
-continues once the results come back in an OBSERVATION turn (see Thinker.stream). Everything here needs no API key:
-DuckDuckGo (via the ddgs package) for search, Open-Meteo for weather. Only the query text leaves the machine.
+continues once the results come back in an OBSERVATION turn (see Thinker.stream). The basics need no API key:
+DuckDuckGo (via the ddgs package) for search (Brave Search too when .brave_key is set), Open-Meteo for weather.
+Only the query text leaves the machine.
 """
 from __future__ import annotations
 
 import ast
 import datetime as _dt
+import html
 import json
 import math
 import operator
@@ -31,6 +33,41 @@ def _get_json(url: str, timeout: float = 6.0):
 # --------------------------------------------------------------------------- web search
 
 _NEWSY = re.compile(r"\b(news|latest|headlines?|today'?s|this week|announce[ds]?|breaking)\b", re.I)
+BRAVE_KEY_FILE = Path(__file__).resolve().parent / ".brave_key"
+
+
+def brave_key() -> str:
+    """A Brave Search API key (optional; https://brave.com/search/api), from MING_BRAVE_KEY or the .brave_key file."""
+    if os.environ.get("MING_BRAVE_KEY"):
+        return os.environ["MING_BRAVE_KEY"].strip()
+    try:
+        return BRAVE_KEY_FILE.read_text().strip()
+    except OSError:
+        return ""
+
+
+def _brave(query: str, news: bool, n: int) -> list[dict]:
+    """Brave Search (web or news) in the same shape as ddgs results; [] without a key or on any error."""
+    key = brave_key()
+    if not key:
+        return []
+    q = {"q": query, "count": n, "extra_snippets": "true", "safesearch": "moderate"}
+    if news:
+        q["freshness"] = "pw"  # past week: otherwise evergreen "All NASA News" pages come first
+    url = f"https://api.search.brave.com/res/v1/{'news' if news else 'web'}/search?" + urllib.parse.urlencode(q)
+    req = urllib.request.Request(url, headers={**UA, "Accept": "application/json", "X-Subscription-Token": key})
+    try:
+        with urllib.request.urlopen(req, timeout=6) as r:
+            d = json.load(r)
+    except Exception:
+        return []
+    items = d.get("results", []) if news else d.get("web", {}).get("results", [])
+    untag = lambda s: re.sub(r"<[^>]+>", "", html.unescape(s or ""))  # noqa: E731 (<strong> around matches)
+    return [{"title": untag(h.get("title")), "href": h.get("url", ""),
+             "body": " ".join(untag(x) for x in [h.get("description")] + (h.get("extra_snippets") or [])[:2]),
+             "date": h.get("age", "") if news else (h.get("page_age") or "")[:10],
+             "source": (h.get("meta_url") or {}).get("hostname", "") if news else ""}
+            for h in items if h.get("title") or h.get("description")]
 
 
 def web_search(query: str, max_results: int = 5) -> tuple[str, dict]:
@@ -40,12 +77,16 @@ def web_search(query: str, max_results: int = 5) -> tuple[str, dict]:
         return "Error: empty query.", {}
     hits = []
     if _NEWSY.search(query):  # dated headlines beat landing pages for "latest news about X"
-        try:
+        try:  # (DuckDuckGo's news ranks better than Brave's, which mixes in evergreen pages or minor blogs)
             hits = [{"title": h.get("title", ""), "body": h.get("body", ""), "href": h.get("url", ""),
                      "date": (h.get("date") or "")[:10], "source": h.get("source", "")}
                     for h in DDGS().news(query, max_results=max_results)]
         except Exception:
             hits = []
+        if len(hits) < 3:
+            hits += _brave(query, True, max_results)
+    if len(hits) < 3:  # web results: Brave when a key is set (fresher, more reliable), else / then DuckDuckGo
+        hits += _brave(query, False, max_results)
     if len(hits) < 3:
         for backend in ("auto", "duckduckgo", "brave"):
             try:
@@ -69,7 +110,7 @@ def web_search(query: str, max_results: int = 5) -> tuple[str, dict]:
     lines = []
     for i, h in enumerate(results, 1):
         meta = " · ".join(x for x in (h.get("source"), h.get("date")) if x)
-        body = re.sub(r"\s+", " ", h.get("body", "")).strip()[:240]
+        body = re.sub(r"\s+", " ", h.get("body", "")).strip()[:300]
         lines.append(f"[{i}] {h.get('title', '').strip()}{f' ({meta})' if meta else ''}: {body}")
     sources = [{"title": h.get("title", "").strip() or h.get("href", ""), "url": h.get("href", "")} for h in results]
     return "\n".join(lines), {"query": query, "sources": sources}
@@ -179,6 +220,164 @@ def get_current_time(timezone: str = "") -> tuple[str, dict]:
         except Exception:
             pass
     return now.strftime("%A, %B %d, %Y, %I:%M %p %Z").replace(" 0", " "), {}
+
+
+# --------------------------------------------------------------------------- timers and reminders
+
+TIMERS_FILE = Path(__file__).resolve().parent / ".timers.json"
+_ONES = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen "
+                                       "fourteen fifteen sixteen seventeen eighteen nineteen".split())}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+_UNIT_S = {"h": 3600, "m": 60, "s": 1}
+_DUR_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(h(?:ou)?rs?|h|min(?:ute)?s?|m|sec(?:ond)?s?|s)\b")
+_CLOCK_RE = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)|\b(\d{1,2}):(\d{2})\b|\b(noon|midday|midnight)\b")
+_DAYS = "monday tuesday wednesday thursday friday saturday sunday".split()
+
+
+def _words_to_digits(s: str) -> str:
+    """'twenty five minutes and a half' -> '25 minutes and a half' (spelled-out numbers up to 99)"""
+    out, acc = [], None
+    for tok in re.split(r"(\s+|-)", s):
+        w = tok.strip().lower()
+        if w in _TENS or w in _ONES:
+            acc = (acc or 0) + (_TENS.get(w) if w in _TENS else _ONES[w])
+            continue
+        if not w and acc is not None:  # whitespace or hyphen between number words
+            continue
+        if acc is not None:
+            out.append(f"{acc} ")
+            acc = None
+        out.append(tok)
+    if acc is not None:
+        out.append(str(acc))
+    return re.sub(r"\s+", " ", "".join(out)).strip()
+
+
+def parse_when(when: str, now: _dt.datetime | None = None) -> tuple[_dt.datetime, bool] | None:
+    """'10 minutes', 'an hour and a half', '90 seconds', 'at 5:30 pm', 'tomorrow at 9am', 'friday at noon'
+    -> (due time, True if it was a duration), or None if it can't be understood."""
+    now = now or _dt.datetime.now().astimezone()
+    s = " " + (when or "").lower().replace(",", " ") + " "
+    s = re.sub(r"\bhalf an? (hour|minute)\b", r"0.5 \1", s)
+    s = re.sub(r"\ban? (hour|minute|second)\b", r"1 \1", s)
+    s = re.sub(r"\ba (couple of|couple|few)\b", lambda m: "2" if "couple" in m.group(1) else "3", s)
+    s = _words_to_digits(s)
+    s = re.sub(r"(\d+(?:\.\d+)?) (?:and a half|and 1 half) (\w+)", lambda m: f"{float(m.group(1)) + 0.5} {m.group(2)}", s)
+    s = re.sub(r"(\d+(?:\.\d+)?) (\w+?)s? and a half\b", lambda m: f"{float(m.group(1)) + 0.5} {m.group(2)}", s)
+    c = _CLOCK_RE.search(s)
+    if c:
+        if c.group(6):
+            h, mi = (12 if c.group(6) in ("noon", "midday") else 0), 0
+        elif c.group(1):
+            h, mi = int(c.group(1)) % 12 + (12 if c.group(3).startswith("p") else 0), int(c.group(2) or 0)
+        else:
+            h, mi = int(c.group(4)), int(c.group(5))
+        if h > 23 or mi > 59:
+            return None
+        due = now.replace(hour=h, minute=mi, second=0, microsecond=0)
+        day = next((i for i, d in enumerate(_DAYS) if d in s), None)
+        if "tomorrow" in s:
+            due += _dt.timedelta(days=1)
+        elif day is not None:
+            due += _dt.timedelta(days=(day - now.weekday()) % 7 or (7 if due <= now else 0))
+        elif due <= now:  # "at 7" said in the evening: the next 7 o'clock
+            due += _dt.timedelta(days=1)
+            if not c.group(3) and not c.group(6) and h < 12 and (due - _dt.timedelta(hours=12)) > now:
+                due -= _dt.timedelta(hours=12)  # "at 7:30" (no am/pm) at 5 pm: 7:30 pm
+        return due, False
+    secs = sum(float(n) * _UNIT_S[u[0]] for n, u in _DUR_RE.findall(s))
+    if not secs:
+        bare = re.fullmatch(r"\s*(?:in |for |after )?(\d+(?:\.\d+)?)\s*", s)
+        secs = float(bare.group(1)) * 60 if bare else 0  # "set a timer for 10": minutes
+    if not 0 < secs <= 7 * 86400:
+        return None
+    return now + _dt.timedelta(seconds=round(secs)), True
+
+
+def reminder_text(message: str) -> tuple[str, str]:
+    """What the model passed as the reminder -> (label, what to say when it goes off); ("", "") for a plain timer.
+    'Remind me to stretch' -> ('stretch', 'Time to stretch.'); 'A 10-minute timer is set.' -> ('', '')."""
+    m = re.sub(r"\s+", " ", (message or "").strip().rstrip(".!")).strip()
+    verb = re.match(r"(?:(?:please )?remind (?:me|the user|him|her|them) (?:to|that)|reminder(?: to|:)|to) (.+)", m, re.I)
+    label = verb.group(1).strip() if verb else m
+    content = set(re.findall(r"[a-z]+", _words_to_digits(label.lower()))) - {
+        "a", "an", "the", "my", "your", "timer", "reminder", "is", "set", "for", "minute", "minutes", "second",
+        "seconds", "hour", "hours", "in", "and", "half", "done", "up", "time", "s"}
+    if not content:
+        return "", ""
+    return label, (f"Time to {label}." if verb else f"Reminder: {label}.")
+
+
+def spoken_duration(secs: float) -> str:
+    secs = int(round(secs))
+    h, m, s = secs // 3600, secs % 3600 // 60, secs % 60
+    parts = [f"{v} {u}{'' if v == 1 else 's'}" for v, u in ((h, "hour"), (m, "minute"), (s, "second")) if v]
+    return " and ".join(parts[:2]) if parts else "0 seconds"
+
+
+def spoken_time(t: _dt.datetime, now: _dt.datetime | None = None) -> str:
+    now = now or _dt.datetime.now().astimezone()
+    clock = t.strftime("%I:%M %p").lstrip("0").replace(":00 ", " ")
+    days = (t.date() - now.date()).days
+    return clock if days == 0 else f"tomorrow at {clock}" if days == 1 else f"{t.strftime('%A')} at {clock}"
+
+
+class Timers:
+    """Timers and reminders, kept in .timers.json so they survive a restart. After start(on_fire), on_fire(entry,
+    late_s) is called from a background thread when one goes off (also for ones that went off while the server was
+    down, up to 12 h late)."""
+
+    def __init__(self, path: Path = TIMERS_FILE):
+        self.path, self.on_fire = path, None
+        self.cv = threading.Condition()
+        try:
+            self.items = [t for t in json.loads(path.read_text()) if t["due"] > time.time() - 12 * 3600]
+        except (OSError, ValueError, KeyError, TypeError):
+            self.items = []
+
+    def start(self, on_fire):
+        self.on_fire = on_fire
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _save(self):
+        try:
+            self.path.write_text(json.dumps(self.items))
+        except OSError:
+            pass
+
+    def add(self, due: float, label: str, duration: float | None, say: str = "") -> dict:
+        with self.cv:
+            t = {"id": max([int(time.time() * 1000)] + [x["id"] + 1 for x in self.items]),  # (unique, and newest last)
+                 "due": due, "label": label, "duration": duration, "say": say}
+            self.items.append(t)
+            self.items.sort(key=lambda x: x["due"])
+            self._save()
+            self.cv.notify()
+        return t
+
+    def remove(self, ts: list[dict]):
+        with self.cv:
+            ids = {t["id"] for t in ts}
+            self.items = [t for t in self.items if t["id"] not in ids]
+            self._save()
+            self.cv.notify()
+
+    def pending(self) -> list[dict]:
+        with self.cv:
+            return list(self.items)
+
+    def _loop(self):
+        while True:
+            with self.cv:
+                while not self.items or self.items[0]["due"] > time.time():
+                    wait = self.items[0]["due"] - time.time() if self.items else None
+                    self.cv.wait(timeout=None if wait is None else max(0.05, min(wait, 30)))
+                t = self.items.pop(0)
+                self._save()
+            try:
+                self.on_fire(t, max(0.0, time.time() - t["due"]))
+            except Exception as e:
+                print(f"timer callback failed: {e!r}", flush=True)
 
 
 # --------------------------------------------------------------------------- Home Assistant
@@ -385,6 +584,14 @@ SPECS = [
         {"expression": {"type": "string", "description": "e.g. '17*23', 'sqrt(2)' or '15% of 80'"}}, ["expression"]),
     _fn("get_current_time", "The current date and time (the user's local time unless a time zone is given).",
         {"timezone": {"type": "string", "description": "optional IANA time zone, e.g. 'Asia/Tokyo'"}}, []),
+    _fn("timer", "Timers and reminders: set one ('set a timer for 10 minutes', 'remind me to call mom at 5 pm'), "
+        "list them with the time left, or cancel one. When it goes off you will be told, and tell the user.",
+        {"action": {"type": "string", "enum": ["set", "list", "cancel"]},
+         "when": {"type": "string", "description": "for set: a duration ('10 minutes', 'an hour and a half') or a time "
+                                                   "('5:30 pm', 'tomorrow at 9 am')"},
+         "message": {"type": "string", "description": "for set: what to remind the user of (empty for a plain timer); "
+                                                      "for cancel: which one ('the pasta timer', 'all')"}},
+        ["action"]),
 ]
 HA_SPEC = _fn("home_assistant", "Control or ask about devices in the user's home through Home Assistant: lights, "
               "switches, plugs, speakers and TV, thermostat, locks, the car, scenes and scripts (not computers or "
@@ -412,7 +619,7 @@ HERMES_SPEC = _fn("ask_hermes", "Delegate a task to Hermes, the user's more capa
 _IMPL = {"web_search": web_search, "get_weather": get_weather, "calculate": calculate,
          "get_current_time": get_current_time, "home_assistant": home_assistant, "jellyfin": jellyfin}
 # Tools that change something: never run for a speculative reply (only once the user's turn has really ended)
-SIDE_EFFECTS = {"home_assistant", "ask_hermes", "jellyfin"}
+SIDE_EFFECTS = {"home_assistant", "ask_hermes", "jellyfin", "timer"}
 # What the assistant says while a slow tool runs (when it said nothing itself before calling it)
 FILLERS = {"web_search": "Let me look that up.", "get_weather": "Let me check the weather."}
 MAX_RESULT_CHARS = 1600  # ~400 tokens: results stay in the context for the rest of the chat
@@ -434,6 +641,7 @@ class Toolbox:
         self.runs: dict[str, str] = {}  # running Hermes run id -> task
         self._last_delegation = 0.0
         self.home = home  # the user's location: in the system prompt, and the default for the weather
+        self.timers = Timers()  # (the server starts it: Timers.start(on_fire))
 
     def signature(self) -> str:
         """What the system prompt depends on (a change means rebuilding the context)."""
@@ -446,7 +654,7 @@ class Toolbox:
     def run(self, name: str, args: dict, cancel: threading.Event | None = None) -> tuple[str, dict]:
         """-> (result text for the model, info for the UI: query/sources/elapsed/error)"""
         t0 = time.perf_counter()
-        impl = ({**_IMPL, "ask_hermes": self._ask_hermes}).get(name) if name in self.names else None
+        impl = ({**_IMPL, "ask_hermes": self._ask_hermes, "timer": self._timer}).get(name) if name in self.names else None
         if impl is None:
             return f"Error: there is no tool named {name!r}.", {"error": "unknown tool"}
         args = {k: v for k, v in (args or {}).items() if isinstance(k, str)}
@@ -460,9 +668,57 @@ class Toolbox:
             text, info = f"Error: {name} failed ({type(e).__name__}: {e}).", {"error": str(e)}
         if len(text) > MAX_RESULT_CHARS:
             text = text[:MAX_RESULT_CHARS].rsplit("\n", 1)[0]
+        if not (info or {}).get("say"):  # (said right before it answers, this works better than in the system prompt)
+            text += "\n(Answer from this in one or two short spoken sentences: no lists, no URLs, no follow-up offers.)"
         info = dict(info or {}, elapsed_ms=round((time.perf_counter() - t0) * 1000))
         return text, info
 
+
+    # -- timers and reminders (they go off through Timers.on_fire) --
+    def _timer(self, action: str = "set", when: str = "", message: str = "") -> tuple[str, dict]:
+        action, when, message = (action or "set").strip().lower(), str(when or "").strip(), str(message or "").strip()
+        now = _dt.datetime.now().astimezone()
+        if action == "set":
+            parsed = parse_when(when) or (parse_when(message) if not when else None)
+            if parsed is None:
+                return (f"Error: could not understand the time {when!r}. Ask the user when it should go off.",
+                        {"error": "bad time"})
+            due, is_duration = parsed
+            secs = (due - now).total_seconds()
+            message, alarm = reminder_text(message)
+            self.timers.add(due.timestamp(), message, secs if is_duration else None, alarm)
+            spoken = f"in {spoken_duration(secs)}" if is_duration else f"at {spoken_time(due, now)}"
+            say = (f"Okay, timer set for {spoken_duration(secs)}." if is_duration and not message
+                   else f"Okay, I'll remind you {spoken}.")
+            return f"Set; it goes off {spoken}.", {"when": spoken, "message": message, "say": say}
+        items = self.timers.pending()
+        if action == "list":
+            if not items:
+                return "No timers or reminders are set.", {}
+            return "; ".join(
+                (f"{spoken_duration(t['duration'])} timer" if t["duration"] and not t["label"] else
+                 f"reminder: {t['label'] or 'no message'}")
+                + f", {spoken_duration(t['due'] - time.time())} left (goes off at "
+                  f"{spoken_time(_dt.datetime.fromtimestamp(t['due']).astimezone(), now)})" for t in items), {}
+        if action == "cancel":
+            which = (message or when).lower()
+            if not items:
+                return "There was nothing to cancel.", {"say": "There's no timer or reminder to cancel."}
+            if "all" in which.split() or "every" in which:
+                hit = items
+            else:
+                words = set(re.findall(r"[a-z0-9]+", _words_to_digits(which))) - {"the", "timer", "reminder", "my", "a"}
+                score = lambda t: len(words & set(re.findall(r"[a-z0-9]+", t["label"].lower() + " " + (  # noqa: E731
+                    spoken_duration(t["duration"]).replace("minutes", "minute") if t["duration"] else ""))))
+                best = max(items, key=score)
+                newest = max(items, key=lambda t: t["id"])
+                hit = [best] if score(best) or len(items) == 1 else [newest] if not words else []
+            if not hit:
+                return f"Error: no timer matches {which!r}; pending: " + self._timer("list")[0], {"error": "no match"}
+            self.timers.remove(hit)
+            return (f"Cancelled {len(hit)}.", {"message": which,
+                    "say": f"Okay, cancelled all {len(hit)}." if len(hit) > 1 else "Okay, it's cancelled."})
+        return f"Error: unknown action {action!r}.", {"error": "bad action"}
 
     # -- Hermes: start a background run, announce its result through on_delegate_done --
     def _ask_hermes(self, task: str) -> tuple[str, dict]:
@@ -526,7 +782,8 @@ def tool_guidance(home: str = "") -> str:
             "(geography, science, history, well-known facts), advice, explanations, stories, jokes and conversation "
             "yourself, without tools and without mentioning them. Call a tool only when the answer depends on live or "
             "recent information (news, weather, prices, scores, recent events), on the current time, or on exact "
-            "arithmetic. You do not know the current time: use get_current_time for it. After a tool returns, answer "
+            "arithmetic, or when the user asks you to do something a tool does (timers and reminders, devices, "
+            "media). You do not know the current time: use get_current_time for it. After a tool returns, answer "
             "from its results in one or two short spoken sentences, never reading out URLs, citation numbers or lists. "
             "If the results don't answer the question, say so briefly.")
 

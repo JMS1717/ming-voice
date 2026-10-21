@@ -57,6 +57,8 @@
   .controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
   #ptt { display: none; user-select: none; touch-action: none; }
   .mode-ptt #ptt { display: inline-flex; }
+  .wake-only { display: none; }
+  .mode-wake .wake-only { display: flex; }
   #ptt.held { background: var(--hear); border-color: var(--hear); color: #fff; }
   .stats { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
   .stat { font-size: 12px; color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 3px 9px; font-variant-numeric: tabular-nums; }
@@ -231,8 +233,9 @@
 
       <h3>Conversation</h3>
       <div class="field"><span>Turn-taking</span>
-        <div class="seg" id="modeSeg"><button data-mode="vad" class="on">Hands-free</button><button data-mode="ptt">Push-to-talk</button></div>
+        <div class="seg" id="modeSeg"><button data-mode="vad" class="on">Hands-free</button><button data-mode="wake" title="Always listening, but only answers after its name: “Hey Ming, …”. Follow-ups within a few seconds of a reply don't need it.">Wake word</button><button data-mode="ptt">Push-to-talk</button></div>
       </div>
+      <div class="field wake-only"><span>Wake word</span><input id="wakeWord" type="text" value="Ming" maxlength="40" autocomplete="off" title="Say it at the start: “Hey Ming, what's the weather?” or just “Hey Ming” and wait for the chime."></div>
       <div class="field"><span>Voice</span>
         <div class="row"><select id="voice"></select><button class="btn" id="previewVoice" title="Hear this voice">&#9654;</button></div>
       </div>
@@ -250,7 +253,7 @@
       </details>
       <label class="check"><input type="checkbox" id="barge" checked> Interrupt the assistant by talking (barge-in)</label>
       <label class="check" title="The server compares what the microphone hears with what it just played, so the assistant's own voice coming out of a speaker doesn't count as you talking. Turn off only if it ignores you when you talk over it."><input type="checkbox" id="echo" checked> Ignore the assistant's own voice (speakerphone echo)</label>
-      <label class="check" title="The assistant can search the web (DuckDuckGo), check the weather (Open-Meteo), calculate and tell the time. Only the search terms leave this computer, never your voice."><input type="checkbox" id="tools" checked> Web search &amp; tools (weather, calculator, time)</label>
+      <label class="check" title="The assistant can search the web (DuckDuckGo), check the weather (Open-Meteo), calculate and tell the time. Only the search terms leave this computer, never your voice."><input type="checkbox" id="tools" checked> Web search &amp; tools (weather, timers, calculator, smart home)</label>
       <div class="field"><span>Your location (for the weather)</span><input id="home" type="text" placeholder="e.g. Seattle, WA" autocomplete="off"></div>
 
       <h3>Timing</h3>
@@ -318,14 +321,21 @@ const STATES = {
   thinking: ['Thinking', ''],
   speaking: ['Speaking', 'Talk over me to interrupt.'],
   muted: ['Muted', 'Press M or Unmute to talk again.'],
+  sleeping: ['Sleeping', ''],
 };
 function setState(s) {
   state = s;
   const [a, b] = STATES[s] || [s, ''];
   $('stateLabel').textContent = a;
-  $('stateSub').textContent = s === 'speaking' && !$('barge').checked ? 'Barge-in is off.' : b;
+  $('stateSub').textContent = s === 'speaking' && !$('barge').checked ? 'Barge-in is off.'
+    : s === 'sleeping' ? `Say “Hey ${wakeName()}” to talk.` : b;
 }
-function restState() { if (!running) return setState(ctx ? 'idle' : 'off'); if (muted) return setState('muted'); setState(mode === 'ptt' ? 'ptt' : 'listening'); }
+function restState() {
+  if (!running) return setState(ctx ? 'idle' : 'off'); if (muted) return setState('muted');
+  setState(mode === 'ptt' ? 'ptt' : mode === 'wake' && !awake ? 'sleeping' : 'listening');
+}
+const wakeName = () => $('wakeWord').value.trim() || 'Ming';
+let awake = false;  // wake-word mode: answering without the wake word (just woken, or within the follow-up window)
 
 // ---------------------------------------------------------------- settings
 const SL = {
@@ -348,12 +358,26 @@ function setMode(m) {
   mode = m; store.set('mode', m);
   for (const b of $('modeSeg').children) b.classList.toggle('on', b.dataset.mode === m);
   document.body.classList.toggle('mode-ptt', m === 'ptt');
+  document.body.classList.toggle('mode-wake', m === 'wake');
+  awake = false;
   sendCfg(); if (state !== 'speaking' && state !== 'thinking') restState();
+}
+$('wakeWord').value = store.get('wakeWord', 'Ming');
+$('wakeWord').addEventListener('change', () => { store.set('wakeWord', wakeName()); sendCfg(); restState(); });
+function chime(notes, gap = 0.13, vol = 0.18) {  // short sine tones: woken up (2 notes), timer/reminder (repeated)
+  if (!ctx) return;
+  const t0 = Math.max(ctx.currentTime, nextTime) + 0.02;
+  notes.forEach((f, i) => {
+    const o = ctx.createOscillator(), g = ctx.createGain(), t = t0 + i * gap;
+    o.type = 'sine'; o.frequency.value = f;
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.01); g.gain.exponentialRampToValueAtTime(0.001, t + gap * 1.6);
+    o.connect(g); g.connect(outGain || ctx.destination); o.start(t); o.stop(t + gap * 1.7);
+  });
 }
 $('modeSeg').addEventListener('click', (e) => { if (e.target.dataset.mode) setMode(e.target.dataset.mode); });
 function sendCfg() {
   if (!ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({ type: 'config', voice: $('voice').value, barge_in: $('barge').checked, echo_guard: $('echo').checked, smart_turn: $('smart').checked, tools: $('tools').checked, home: $('home').value.trim(), mode,
+  ws.send(JSON.stringify({ type: 'config', voice: $('voice').value, barge_in: $('barge').checked, echo_guard: $('echo').checked, smart_turn: $('smart').checked, tools: $('tools').checked, home: $('home').value.trim(), mode, wake_word: wakeName(),
     end_ms: +$('end').value, short_extra_ms: +$('short').value, spec_ms: +$('spec').value, resume_ms: +$('resume').value, threshold: +$('th').value }));
 }
 $('preset').value = store.get('preset', 'assistant');
@@ -531,7 +555,7 @@ async function startMic() {
   capNode = new AudioWorkletNode(ctx, 'cap');
   capNode.port.onmessage = (e) => {
     inLevel = Math.max(inLevel * 0.6, e.data.peak);
-    const live = !muted && (mode === 'vad' || pttHeld);
+    const live = !muted && (mode !== 'ptt' || pttHeld);
     const frame = new Int16Array(e.data.pcm);
     capRing.push(frame); capRingLen += frame.length;
     while (capRingLen > 16000 * 60 && capRing.length) { capRingLen -= capRing.shift().length; if (speechStartIdx !== null) speechStartIdx--; if (lastTurnIdx !== null) lastTurnIdx = Math.max(0, lastTurnIdx - 1); }
@@ -598,18 +622,19 @@ function addMsg(cls, text) {
   const m = document.createElement('div'); m.className = 'meta'; d.appendChild(m);
   $('log').appendChild(d); scrollLog(); return d;
 }
-const TOOL_ICON = { web_search: '🔎', get_weather: '🌤', calculate: '🧮', get_current_time: '🕒', home_assistant: '🏠', jellyfin: '🎬', ask_hermes: '🤖', hermes_result: '🤖' };
+const TOOL_ICON = { web_search: '🔎', get_weather: '🌤', calculate: '🧮', get_current_time: '🕒', home_assistant: '🏠', jellyfin: '🎬', ask_hermes: '🤖', hermes_result: '🤖', timer: '⏲', timer_done: '⏰' };
 function showTool(msgEl, m) {  // a tool call shown above the reply: what it looked up, and the sources
   let box = msgEl.querySelector('.tools');
   if (!box) { box = document.createElement('div'); box.className = 'tools'; msgEl.prepend(box); }
   const key = m.name + JSON.stringify(m.args || {});
   let row = [...box.children].find((r) => r.dataset.key === key);
   if (!row) { row = document.createElement('div'); row.dataset.key = key; box.appendChild(row); }
-  const a = m.args || {}, what = a.query || a.location || a.expression || a.command || a.task || a.timezone || '';
+  const a = m.args || {}, what = a.query || a.location || a.expression || a.command || a.task || a.timezone
+    || [a.message, a.when].filter(Boolean).join(', ') || (m.name === 'timer' && a.action !== 'set' ? a.action : '') || '';
   const verb = { web_search: ['Searching', 'Searched'], get_weather: ['Checking the weather', 'Weather'],
                  calculate: ['Calculating', 'Calculated'], get_current_time: ['Checking the time', 'Checked the time'],
                  home_assistant: ['Home Assistant', 'Home Assistant'], ask_hermes: ['Asking Hermes', 'Passed to Hermes'], jellyfin: ['Jellyfin', 'Jellyfin'],
-                 hermes_result: ['Hermes finished', 'Hermes finished'] }[m.name] || [m.name, m.name];
+                 hermes_result: ['Hermes finished', 'Hermes finished'], timer: ['Timer', 'Timer'], timer_done: ['Time’s up', 'Time’s up'] }[m.name] || [m.name, m.name];
   row.textContent = `${TOOL_ICON[m.name] || '🛠'} ${verb[m.status === 'done' ? 1 : 0]}${what ? ': ' + what : ''}${m.status === 'done' ? '' : '…'}`;
   if (m.status === 'done' && m.error) row.textContent += ' (failed)';
   if (m.status === 'done' && (m.sources || []).length) {
@@ -693,6 +718,12 @@ function connect() {
         if (botMsg) { botMsg.querySelector('.txt').textContent = botText; scrollLog(); }
         break;
       case 'tool': if (botMsg) showTool(botMsg, m); break;
+      case 'wake':  // wake-word mode: asleep / awake (heard the wake word, or a reply's follow-up window)
+        awake = m.state !== 'asleep';
+        if (m.state === 'listening') chime([660, 880]);  // "Hey Ming" on its own: go ahead
+        if (!['hearing', 'thinking', 'speaking'].includes(state)) restState();
+        break;
+      case 'alarm': chime([880, 660, 880, 660, 880, 660], 0.16, 0.25); break;  // a timer or reminder went off
       case 'interrupt':
         stopPlayback(); finishBot(true); restState(); break;
       case 'retract': {  // you kept talking right after it started answering: that reply is withdrawn and

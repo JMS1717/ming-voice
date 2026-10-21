@@ -14,6 +14,7 @@ import io
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -44,8 +45,18 @@ from echo_guard import EchoGuard
 from engine import DEFAULT_SYSTEM_PROMPT, Fragmenter, GpuKeepAwake, Talker, Thinker, log
 from tools import FILLERS, Toolbox
 
-TOOLBOX = Toolbox()  # web search, weather, calculator, clock, Home Assistant, Hermes (when the session enables tools)
-NOTICES: list = []  # finished Hermes tasks waiting to be announced: (prompt for the model, task, ok)
+TOOLBOX = Toolbox()  # web search, weather, calculator, clock, timers, Home Assistant, Jellyfin, Hermes
+# Things to announce at the next quiet moment (finished Hermes tasks, timers going off):
+# {"prompt": for the model, "events": JSON messages for the client}
+NOTICES: list = []
+
+
+def _notify(prompt: str, events: list):
+    """prompt: 'what happened) what to do', completing '(Notification for you, not said by the user: '"""
+    NOTICES.append({"prompt": f"(Notification for you, not said by the user: {prompt}", "events": events})
+    sess = ACTIVE.get("sess")
+    if sess is not None:
+        sess.loop.call_soon_threadsafe(sess.deliver_notices)
 
 
 def _delegate_done(task: str, ok, text: str):
@@ -53,14 +64,26 @@ def _delegate_done(task: str, ok, text: str):
     log(f"hermes {'done' if ok else 'failed' if ok is False else 'waiting'}: {task!r} -> {text[:200]!r}")
     what = (f'Hermes finished the task "{task}". Its answer: {text}' if ok else
             f'Hermes could not finish the task "{task}": {text}' if ok is False else f'{text} (Task: "{task}")')
-    NOTICES.append((f"(Notification for you, not said by the user: {what}) Tell the user briefly, in your own words.",
-                    task, ok))
-    sess = ACTIVE.get("sess")
-    if sess is not None:
-        sess.loop.call_soon_threadsafe(sess.deliver_notices)
+    _notify(f"{what}) Tell the user briefly, in your own words.", [
+        {"type": "tool", "status": "done", "name": "hermes_result", "args": {"task": task},
+         "error": None if ok or ok is None else "failed"}])
+
+
+def _timer_fired(t: dict, late_s: float):
+    from tools import spoken_duration
+    say = t.get("say") or (f"Your {spoken_duration(t['duration'])} timer is done." if t["duration"] else "Time's up.")
+    if late_s > 90:
+        say += f" That was {spoken_duration(late_s)} ago."
+    log(f"timer fired: {say!r}")
+    # (a fixed sentence: asked to phrase it, the small model sometimes "confirms" the reminder instead of giving it)
+    _notify(f'a timer or reminder the user set has just gone off.) Say exactly this to the user, nothing else: "{say}"',
+            [{"type": "alarm"},
+                   {"type": "tool", "status": "done", "name": "timer_done",
+                    "args": {"message": t["label"] or f"{spoken_duration(t['duration'] or 0)} timer"}}])
 
 
 TOOLBOX.on_delegate_done = _delegate_done
+TOOLBOX.timers.start(_timer_fired)
 
 ECHO_DEBUG = bool(os.environ.get("MING_ECHO_DEBUG"))
 
@@ -70,6 +93,20 @@ FRAME = 512  # 32 ms @ 16 kHz (Silero VAD window)
 ENGINE: dict = {}
 GPU_TURN = threading.Lock()  # one reply generating at a time
 TURN_POOL = ThreadPoolExecutor(1)  # Smart Turn runs off the event loop (~20 ms on the CPU)
+WAKE_POOL = ThreadPoolExecutor(1)  # wake-word checks (a short transcription, ~0.2 s on the GPU)
+WAKE_CHECK_S = 1.6  # how much of an utterance's start is checked for the wake word
+
+
+def find_wake_word(text: str, word: str) -> tuple[bool, str]:
+    """Is the wake word among the first few words ("Hey Ming, ...", "Okay Ming", "Ming, ...")? -> (found, the
+    words after it). ASR sometimes writes a lone "Hey Ming" in Chinese (嘿，明)."""
+    toks = re.findall(r"[a-z0-9']+|[一-鿿]", text.lower())
+    name = (word.lower().split() or ["ming"])[-1]
+    names = {name, name + "'s"} | ({"明", "铭"} if name == "ming" else set())
+    for i, t in enumerate(toks[:4]):
+        if t in names:
+            return True, " ".join(toks[i + 1:])
+    return False, ""
 
 
 def _load():
@@ -424,8 +461,19 @@ class Session:
         self.resume_ms = 1000
         self.undo_lock = threading.Lock()
         self.pending_restore = None  # snapshot to restore before the next turn (undo of a finished reply)
-        self.mode = "vad"  # "vad" (hands-free) or "ptt" (push-to-talk)
+        self.mode = "vad"  # "vad" (hands-free), "wake" (hands-free after the wake word) or "ptt" (push-to-talk)
         self.ptt_down = False
+        # Wake word: while asleep, speech only counts if it starts with the wake word, checked by transcribing its
+        # first WAKE_CHECK_S while the user is still talking (so the decision is ready when they pause). After
+        # each reply it stays awake for follow_up_s, so the conversation can go on without it.
+        self.wake_word = "Ming"
+        self.follow_up_s = 8.0
+        self.awake_until = 0.0
+        self.utt_id = 0
+        self.gated = False  # this utterance started while asleep: it needs the wake word
+        self.wake_fut = None
+        self.wake = None  # (found, words after it, seconds checked) once checked
+        self.wake_pending = None  # an utterance that ended before its check finished: (utt_id, audio, msg)
         self.reply: Reply | None = None
         self.spec: Reply | None = None
         self.asr_cancel = threading.Event()  # set when the user starts a new turn: drop background ASR
@@ -459,10 +507,14 @@ class Session:
         if busy:
             self.loop.call_later(0.5, self.deliver_notices)
             return
-        prompt, task, ok = NOTICES.pop(0)
-        r = self.start_reply(None, user_text=prompt)
-        self.emit_json({"type": "tool", "status": "done", "name": "hermes_result", "args": {"task": task},
-                        "error": None if ok or ok is None else "failed"})
+        n = NOTICES.pop(0)
+        for ev in n["events"]:
+            if ev["type"] == "alarm":  # the chime plays before the announcement
+                self.emit_json(ev)
+        r = self.start_reply(None, user_text=n["prompt"])
+        for ev in n["events"]:
+            if ev["type"] != "alarm":
+                self.emit_json(ev)
         if NOTICES:
             self.loop.call_later(1.0, self.deliver_notices)
         return r
@@ -577,6 +629,8 @@ class Session:
                     self.interrupt()
                 self.speaking_frames = 0
                 self.reset_listen()
+                self.utt_id += 1
+                self.gated, self.wake_fut, self.wake = False, None, None  # (talking over a reply: no wake word needed)
                 self.in_speech = True
                 self.frames = ([prev] if prev is not None else []) + list(self.preroll)
                 self.speech_frames = len(self.frames)
@@ -590,6 +644,8 @@ class Session:
             self.preroll = self.preroll[-10:]  # 320 ms pre-roll
             if p >= self.threshold and not echo:  # (echo: the tail of the reply still coming back)
                 self.asr_cancel.set()
+                self.utt_id += 1
+                self.gated, self.wake_fut, self.wake = not self.awake, None, None
                 self.in_speech = True
                 self.frames = list(self.preroll)
                 self.speech_frames = 1
@@ -597,6 +653,8 @@ class Session:
                 self.emit_json({"type": "vad", "state": "speech"})
             return
         self.frames.append(f)
+        if self.gated and self.wake_fut is None and len(self.frames) * FRAME >= WAKE_CHECK_S * 16000:
+            self._check_wake()
         if p >= self.threshold:
             self.n_loud += 1
             self.speech_rms += (rms - self.speech_rms) / min(self.n_loud, 50)
@@ -618,11 +676,14 @@ class Session:
         speech_s = self.speech_frames * FRAME / 16000
         long_enough = speech_s >= 0.25
         end_ms = self._end_of_turn_ms(silence_ms, speech_s, long_enough)
+        if self.gated and self.wake_fut is None and long_enough and silence_ms >= self.spec_ms:
+            self._check_wake()  # (a short utterance: check what there is)
         if (self.spec_ms and self.spec is None and long_enough and silence_ms >= self.spec_ms
-                and silence_ms < end_ms):
+                and silence_ms < end_ms and (not self.gated or (self.wake and self.wake[0]))):
             self.spec = self.start_reply(self._utterance(), speculative=True)
         if silence_ms >= end_ms and released:
             audio = self._utterance()
+            gated, wake = self.gated, self.wake
             self.reset_listen()
             self.preroll = []
             self.vad.reset_states()
@@ -632,6 +693,14 @@ class Session:
                 return
             msg = {"type": "user_end", "seconds": round(len(audio) / 16000, 2), "pause_ms": round(silence_ms),
                    "turn_p": None if self.turn_p is None else round(self.turn_p, 3)}
+            if gated:
+                if wake is None:  # the check is still running: decide when it's done (_wake_result)
+                    self._abort_spec()
+                    self.wake_pending = (self.utt_id, audio, msg)
+                    return
+                if not self._wake_go(wake, audio):
+                    self._abort_spec()
+                    return
             spec, self.spec = self.spec, None
             if spec is not None:
                 msg["id"] = spec.id
@@ -667,6 +736,68 @@ class Session:
         audio = np.concatenate(self.frames)
         keep = len(audio) - int(max(0, self.pause_frames * FRAME - 150 * 16))  # keep ~150 ms of silence
         return audio[:max(keep, FRAME)]
+
+    # -- wake word --
+    @property
+    def awake(self):
+        return (self.mode != "wake" or time.time() < self.awake_until or self.responding
+                or (self.reply is not None and self.reply.active))
+
+    def _check_wake(self):
+        """Transcribe the start of the current utterance (in the background) and look for the wake word."""
+        uid, clip, word = self.utt_id, np.concatenate(self.frames)[:int(WAKE_CHECK_S * 16000)], self.wake_word
+
+        def run():
+            with GPU_TURN:
+                return ENGINE["thinker"].transcribe(clip, max_new_tokens=12)
+
+        self.wake_fut = WAKE_POOL.submit(run)
+        self.wake_fut.add_done_callback(
+            lambda f: self.loop.call_soon_threadsafe(self._wake_result, uid, f, word, len(clip) / 16000))
+
+    def _wake_result(self, uid, fut, word, clip_s):
+        try:
+            text = fut.result()
+        except Exception as e:
+            log("wake check error:", repr(e))
+            text = ""
+        found, rest = find_wake_word(text, word)
+        if found:
+            log(f"wake word: {text!r}")
+            self.emit_json({"type": "wake", "state": "awake"})
+        if uid == self.utt_id:
+            self.wake = (found, rest, clip_s)
+        pend, self.wake_pending = self.wake_pending, None
+        if pend is not None and pend[0] == uid and self._wake_go((found, rest, clip_s), pend[1]):
+            self.start_reply(pend[1], user_end_msg=pend[2])
+        elif pend is not None and pend[0] != uid:
+            self.wake_pending = pend
+
+    def _wake_go(self, wake, audio) -> bool:
+        """End of a gated utterance: True to answer it. Just the wake word ("Hey Ming") -> awake, chime, no reply."""
+        found, rest, clip_s = wake
+        if not found:
+            self.emit_json({"type": "vad", "state": "ignored"})
+            return False
+        # (the check may have run at the first pause, "Hey Ming, | what's ...": words after the clip are a command)
+        if len(rest.split()) < 2 and clip_s >= len(audio) / 16000 - 0.3:
+            self._stay_awake(self.follow_up_s)
+            self.emit_json({"type": "wake", "state": "listening"})  # (the client chimes)
+            return False
+        return True
+
+    def _stay_awake(self, seconds):
+        self.awake_until = max(self.awake_until, time.time() + seconds)
+        self.loop.call_later(self.awake_until - time.time() + 0.05, self._maybe_sleep)
+
+    def _replied(self):
+        """A reply finished generating (event loop): stay awake until it has played, plus the follow-up window."""
+        if self.mode == "wake":
+            self._stay_awake(max(0.0, self.play_until - time.time()) + self.follow_up_s)
+
+    def _maybe_sleep(self):
+        if self.mode == "wake" and not self.awake and not self.in_speech and self.wake_pending is None:
+            self.emit_json({"type": "wake", "state": "asleep"})
 
     # -- reply --
     def start_reply(self, audio, user_text=None, speculative=False, user_end_msg=None):
@@ -810,6 +941,7 @@ class Session:
               "audio_s": round(n_samples[0] / Talker.SR, 2), "ctx_tokens": th.ctx_len()}
         log(f"turn: {text!r} | {ms}{' (interrupted)' if cancel.is_set() else ''}")
         r.emit("json", {"type": "done", "text": text, "metrics": ms, "interrupted": cancel.is_set()})
+        self.loop.call_soon_threadsafe(self._replied)
 
     # -- control --
     def on_control(self, msg: dict):
@@ -839,12 +971,19 @@ class Session:
                 self.fast_end_ms = int(max(100, min(1000, msg["fast_end_ms"])))
             if "threshold" in msg:
                 self.threshold = float(max(0.2, min(0.95, msg["threshold"])))
-            if msg.get("mode") in ("vad", "ptt") and msg["mode"] != self.mode:
+            if "wake_word" in msg and str(msg["wake_word"] or "").strip():
+                self.wake_word = str(msg["wake_word"]).strip()[:40]
+            if "follow_up_s" in msg:
+                self.follow_up_s = float(max(0, min(60, msg["follow_up_s"])))
+            if msg.get("mode") in ("vad", "ptt", "wake") and msg["mode"] != self.mode:
                 self.mode = msg["mode"]
                 self._abort_spec()
                 self.reset_listen()
                 self.ptt_down = False
                 self.vad.reset_states()
+                self.awake_until, self.wake_pending = 0.0, None
+            if self.mode == "wake":
+                self.emit_json({"type": "wake", "state": "awake" if self.awake else "asleep"})
         elif t == "ptt":
             if msg.get("state") == "down":
                 self.asr_cancel.set()
