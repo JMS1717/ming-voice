@@ -40,6 +40,12 @@ TOOL_RESERVE = 1500  # context kept free for tool results when tools are on
 ROLLOVER_MAX = 4096  # at most this much earlier conversation (as text) carries over a context rollover
 COMPACT_HEADROOM = 1200  # compact between turns once less than this (+ the tool reserve) is left for the next turn
 TOOL_ANSWER_WORDS = 35  # an answer from tool results ends at the first sentence end after this many words
+BRIEF_TOOLS = {"get_current_time", "calculate", "timer"}  # (one-line results: nothing to read out at length)
+ANSWER_WORDS = 80  # any other answer (~30 s spoken) too, unless the user asked for something long:
+LONG_ASK = re.compile(r"\b(stor(y|ies)|poem|song|lyrics|essay|in detail|detailed|more detail|step by step|steps|"
+                      r"instructions|recipe|walk me through|everything|all (of )?the|full|long|longer|keep going|"
+                      r"go on|continue|read)\b", re.I)
+SENTENCE_END = re.compile(r"(?<!\d)[.!?]$|\n$")
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are Ming, a friendly, helpful voice assistant in a live spoken conversation. "
@@ -989,7 +995,8 @@ class Thinker:
         human += user_text or ""
         # With tools, the reply starts from a private note of the local time (asked "what time is it?", the model
         # would rather offer to check than call get_current_time; the system prompt can't hold a changing time).
-        note = time.strftime("(It's %I:%M %p now.)").replace("s 0", "s ") if self.tools is not None else ""
+        note = time.strftime("(It's %I:%M %p on %A, %B %d, %Y.)").replace("s 0", "s ").replace(" 0", " ") \
+            if self.tools is not None else ""
         tail = f"<role>HUMAN</role>{human}{ROLE_END}<role>ASSISTANT</role>\n<think>{note}</think>"
         n_tail = len(self.tok(tail, add_special_tokens=False).input_ids)
         rollover = ""
@@ -1018,12 +1025,16 @@ class Thinker:
         emitted = ""
         seen, used_tools = set(), False
         answer_from = None  # where the answer from tool results starts in `emitted`
+        capped = True  # ANSWER_WORDS applies (until the transcript shows the user asked for something long)
         try:
             for rnd in range(MAX_TOOL_ROUNDS + 1):
                 call: list[int] = []
                 n = 0
-                limit = min(max_new_tokens, self.max_ctx - self.cur_len - 2)
-                while tok not in EOS_IDS and n < limit and not cancel.is_set():
+                room = self.max_ctx - self.cur_len - 2
+                limit = min(max_new_tokens, room)
+                # past the limit, a reply may run on a little to finish its sentence (not stop at "But the hardest")
+                hard = min(max_new_tokens + (60 if max_new_tokens >= 100 else 0), room)
+                while tok not in EOS_IDS and n < hard and not cancel.is_set():
                     n += 1
                     if tok == TOOL_CALL_ID and rnd == MAX_TOOL_ROUNDS:
                         break  # yet another call after the last allowed round: end the reply (never speak it)
@@ -1036,10 +1047,20 @@ class Thinker:
                             yield full[len(emitted):]
                             emitted = full
                             # Search results tempt it into reading out whole lists: after a tool, stop at the
-                            # first sentence end past TOOL_ANSWER_WORDS words.
-                            if (answer_from is not None and re.search(r"(?<!\d)[.!?]$|\n$", full)
-                                    and len(full[answer_from:].split()) >= TOOL_ANSWER_WORDS):
-                                break
+                            # first sentence end past TOOL_ANSWER_WORDS words. A spoken monologue is no better
+                            # without tools: stop past ANSWER_WORDS, unless asked for a story, steps, details...
+                            # (the transcript is only made then, while the audio already sent is still playing).
+                            if SENTENCE_END.search(full):
+                                if n >= limit:
+                                    break
+                                if answer_from is not None:
+                                    if len(full[answer_from:].split()) >= TOOL_ANSWER_WORDS:
+                                        break
+                                elif capped and len(full.split()) >= ANSWER_WORDS:
+                                    capped = False
+                                    if not LONG_ASK.search(said()):
+                                        log(f"long answer: ending it at {len(full.split())} words")
+                                        break
                     tok = self._step(tok)
                 if not call or cancel.is_set():
                     break
@@ -1093,7 +1114,8 @@ class Thinker:
                 if ids.shape[1] > room:
                     break
                 tok = self._prefill(ids, {})
-                answer_from = len(emitted)
+                if any(n not in BRIEF_TOOLS for n, _ in calls):
+                    answer_from = len(emitted)
             if used_tools and not emitted.strip() and not cancel.is_set():  # tools led nowhere: don't go silent
                 sorry = "Sorry, I couldn't get that done."
                 gen += self.tok(sorry, add_special_tokens=False).input_ids

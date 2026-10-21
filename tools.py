@@ -18,6 +18,7 @@ import os
 import re
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -25,9 +26,19 @@ from pathlib import Path
 UA = {"User-Agent": "ming-voice/1.0 (+https://github.com/JMS1717/ming-voice)"}
 
 
-def _get_json(url: str, timeout: float = 6.0):
-    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout) as r:
-        return json.load(r)
+def _get_json(url: str, timeout: float = 3.5, tries: int = 2):
+    """GET a JSON API; a slow, dropped or 5xx answer is tried once more (a 4xx is not)."""
+    for i in range(tries):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or i == tries - 1:
+                raise
+        except (OSError, ValueError):  # timeout, connection reset, half a body
+            if i == tries - 1:
+                raise
+        time.sleep(0.2)
 
 
 # --------------------------------------------------------------------------- web search
@@ -127,15 +138,20 @@ _WMO = {0: "clear sky", 1: "mainly clear", 2: "partly cloudy", 3: "overcast", 45
 _IMPERIAL = {"US", "LR", "MM"}
 
 
+_PLACES: dict[str, list] = {}  # geocoding results by lower-case place name
+
+
 def get_weather(location: str) -> tuple[str, dict]:
     location = (location or "").strip()
     if not location:
         return "Error: no location given. Ask the user where.", {}
     # "Paris, France" -> search "Paris", prefer the matching country/admin area
     name, _, hint = location.partition(",")
-    found = _get_json("https://geocoding-api.open-meteo.com/v1/search?"
-                      + urllib.parse.urlencode({"name": name.strip(), "count": 10, "language": "en"}))
-    places = found.get("results") or []
+    key = name.strip().lower()
+    if key not in _PLACES:  # (places don't move: one lookup per name saves a round trip on every later ask)
+        _PLACES[key] = _get_json("https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode(
+            {"name": name.strip(), "count": 10, "language": "en"})).get("results") or []
+    places = list(_PLACES[key])
     if not places:
         return f"Error: could not find a place called {location!r}.", {}
     hint = hint.strip().lower()
@@ -582,8 +598,8 @@ SPECS = [
     _fn("calculate", "Evaluate arithmetic exactly (+ - * / ** %, sqrt, sin, log, pi...). Use for any calculation "
         "beyond simple mental math.",
         {"expression": {"type": "string", "description": "e.g. '17*23', 'sqrt(2)' or '15% of 80'"}}, ["expression"]),
-    _fn("get_current_time", "The current date and time in another time zone (the user's local time is already in "
-        "your note).",
+    _fn("get_current_time", "The current date and time in another time zone (the user's local date and time are "
+        "already in your note).",
         {"timezone": {"type": "string", "description": "optional IANA time zone, e.g. 'Asia/Tokyo'"}}, []),
     _fn("timer", "Timers and reminders: set one ('set a timer for 10 minutes', 'remind me to call mom at 5 pm'), "
         "list them with the time left, or cancel one. When it goes off you will be told, and tell the user.",
@@ -860,7 +876,8 @@ def tool_guidance(home: str = "") -> str:
             "only when the answer depends on live or "
             "recent information (news, weather, prices, scores, recent events), on the time in another place, or on exact "
             "arithmetic, or when the user asks you to do something a tool does (timers and reminders, devices, "
-            "media). Your private note at the start of each reply has the user's local time; use get_current_time "
+            "media). You can always get the weather and look things up online, so never say you can't: call the "
+            "tool. Your private note at the start of each reply has the user's local date and time; use get_current_time "
             "only for the time somewhere else. After a tool returns, answer "
             "from its results in one or two short spoken sentences, never reading out URLs, citation numbers or lists. "
             "If the results don't answer the question, say so briefly.")

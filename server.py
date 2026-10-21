@@ -85,15 +85,25 @@ def _delegate_done(task: str, ok, text: str):
 
 def _timer_fired(t: dict, late_s: float):
     from tools import spoken_duration
-    say = t.get("say") or (f"Your {spoken_duration(t['duration'])} timer is done." if t["duration"] else "Time's up.")
+    say = t.get("say") or (f"Your timer for {spoken_duration(t['duration'])} is done." if t["duration"] else "Time's up.")
     if late_s > 90:
         say += f" That was {spoken_duration(late_s)} ago."
     log(f"timer fired: {say!r}")
+    _alarm(say, t["label"] or f"{spoken_duration(t['duration'] or 0)} timer", ALARM_REPEATS)
+
+
+# A timer that went off is said again every ALARM_REPEAT_S, up to ALARM_REPEATS more times, until the user says
+# anything (a kitchen timer is easy to miss from the next room).
+ALARM_REPEAT_S = float(os.environ.get("MING_ALARM_REPEAT_S", "60"))
+ALARM_REPEATS = int(os.environ.get("MING_ALARM_REPEATS", "2"))
+RINGING: dict = {}  # the alarm last said and not yet answered: {"say", "label", "left", "said_at"}
+
+
+def _alarm(say: str, label: str, left: int):
     # (a fixed sentence: asked to phrase it, the small model sometimes "confirms" the reminder instead of giving it)
     _notify(f'a timer or reminder the user set has just gone off.) Say exactly this to the user, nothing else: "{say}"',
-            [{"type": "alarm"},
-                   {"type": "tool", "status": "done", "name": "timer_done",
-                    "args": {"message": t["label"] or f"{spoken_duration(t['duration'] or 0)} timer"}}])
+            [{"type": "alarm", "say": say, "label": label, "left": left},
+             {"type": "tool", "status": "done", "name": "timer_done", "args": {"message": label}}])
 
 
 def announce(message: str, chime: bool = True, verbatim: bool = True, source: str = "Home Assistant",
@@ -279,7 +289,7 @@ async def lifespan(_app):
     yield
 
 
-app = FastAPI(lifespan=lifespan, title="Ming Voice", version="1.3",
+app = FastAPI(lifespan=lifespan, title="Ming Voice", version="1.4",
               description="Local speech-to-speech assistant. The web app is at `/`; the OpenAI-compatible API is "
                           "under `/v1`. From other devices (LAN port) send `Authorization: Bearer <access key>`.")
 api.setup(ENGINE, GPU_TURN, VOICES)
@@ -608,14 +618,32 @@ class Session:
             return
         for ev in n["events"]:
             if ev["type"] in ("alarm", "chime"):  # the chime plays before the announcement
-                self.emit_json(ev)
+                self.emit_json({"type": ev["type"]})
         r = self.start_reply(None, user_text=n["prompt"])
+        alarm = next((ev for ev in n["events"] if ev["type"] == "alarm"), None)
+        if alarm and alarm.get("left"):
+            ringing = dict(alarm, said_at=time.time())
+            RINGING.clear()
+            RINGING.update(ringing)
+            self.loop.call_later(ALARM_REPEAT_S, self._alarm_again, ringing["said_at"])
         for ev in n["events"]:
             if ev["type"] not in ("alarm", "chime"):
                 self.emit_json(ev)
         if NOTICES:
             self.loop.call_later(1.0, self.deliver_notices)
         return r
+
+    def _alarm_again(self, said_at: float):
+        """No answer since the alarm was said: say it again (event loop)."""
+        if RINGING.get("said_at") != said_at:  # answered, or a newer alarm took over
+            return
+        if self._busy() or self.in_speech:  # (talking, or the user may be answering right now)
+            self.loop.call_later(2.0, self._alarm_again, said_at)
+            return
+        r = dict(RINGING)
+        RINGING.clear()
+        log(f"timer not answered, saying it again: {r['say']!r}")
+        _alarm(r["say"], r["label"], r["left"] - 1)
 
     @property
     def responding(self):
@@ -926,6 +954,8 @@ class Session:
     def start_reply(self, audio, user_text=None, speculative=False, user_end_msg=None):
         self.asr_cancel.set()
         self.asr_cancel = threading.Event()
+        if not (user_text or "").startswith("(Notification"):
+            RINGING.clear()  # the user said something: the alarm was heard
         r = Reply(self, audio, user_text, speculative)
         if not speculative:
             if self.reply is not None:
@@ -1130,6 +1160,7 @@ class Session:
                 else:
                     self.start_reply(audio, user_end_msg={"type": "user_end", "seconds": round(len(audio) / 16000, 2)})
         elif t == "reset":
+            RINGING.clear()
             self._abort_spec()
             self.interrupt("reset")
             th = ENGINE["thinker"]
@@ -1142,6 +1173,7 @@ class Session:
             threading.Thread(target=do_reset, daemon=True).start()
             self.emit_json({"type": "reset_ok"})
         elif t == "stop":
+            RINGING.clear()
             self.interrupt("stop")
         elif t == "text":  # typed input, same pipeline
             self._abort_spec()
