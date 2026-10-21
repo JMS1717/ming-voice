@@ -2,7 +2,8 @@
 
     .venv/bin/python dev/test_tools.py            # unit checks + live checks against localhost:8000
     .venv/bin/python dev/test_tools.py --offline  # unit checks only (no server, no network)
-    .venv/bin/python dev/test_tools.py --home     # only Home Assistant / Jellyfin / Hermes (what's configured)
+    .venv/bin/python dev/test_tools.py --home     # only Home Assistant / Jellyfin (what's configured)
+    .venv/bin/python dev/test_tools.py --hermes   # only the Hermes delegation (sends Hermes a real task)
 
 Live checks: the model calls a tool when the question needs one (news, weather, arithmetic, time) and not for
 general knowledge or small talk, answers from the results, says something while a slow tool runs, keeps the
@@ -89,6 +90,33 @@ for cmd in ("is the garage open?", "Is the garage door open", "lock the front do
     check(not tools.is_risky(cmd), f"not risky: {cmd}")
 for cmd in ("disarm the alarm", "turn off the security system", "raise the garage door", "open the gate"):
     check(tools.is_risky(cmd), f"risky: {cmd}")
+started = []  # Hermes only when the user says its name
+tools._hermes = lambda method, path, body=None, timeout=10.0: (started.append(body) or {"run_id": "r1"}) \
+    if method == "POST" and path == "/v1/runs" else {"status": "completed", "output": "ok"}
+xb = Toolbox(specs=tools.SPECS + [tools.HERMES_SPEC])
+for said, ok in (("hey ming what is the capital of france", False), ("check my email", False),
+                 ("Ask Hermes how long its server has been up.", True), ("can you ask hermès to check the backups", True),
+                 ("have Hermies look into it", True), ("what's the weather in Hermosa Beach", False)):
+    xb.new_turn(lambda s=said: s)
+    xb._last_delegation = 0
+    r = xb.run("ask_hermes", {"task": "x"})
+    check(bool(r[1].get("run_id")) == ok and (ok or r[1].get("refused")), f"Hermes {'used' if ok else 'refused'}: {said!r}")
+check(len(started) == 3, "only the asked-for tasks reached Hermes")
+os.environ["MING_HERMES_AUTO"] = "1"
+xb.new_turn(lambda: "what's on my calendar")
+xb._last_delegation = 0
+check(bool(xb.run("ask_hermes", {"task": "x"})[1].get("run_id")), "MING_HERMES_AUTO=1: Hermes on its own again")
+del os.environ["MING_HERMES_AUTO"]
+played = []  # Jellyfin plays only when asked to
+tools.jellyfin = lambda action, query="", device="": (played.append((action, query)) or "ok", {})
+jb = Toolbox(specs=tools.SPECS + [tools.JELLYFIN_SPEC])
+for said, action, ok in (("tell me a joke", "play", False), ("play the office", "play", True),
+                         ("put on some jazz", "play", True), ("do I have the office", "search", True),
+                         ("tell me a joke", "search", False)):
+    jb.new_turn(lambda s=said: s)
+    r = jb.run("jellyfin", {"action": action, "query": "x"})
+    check(bool(r[1].get("refused")) != ok, f"Jellyfin {action} {'runs' if ok else 'refused'}: {said!r}")
+check(len(played) == 3, "only the asked-for Jellyfin actions ran")
 check(tb.run("rm_rf", {})[0].startswith("Error"), "unknown tool -> error text, no exception")
 check(tb.run("calculate", {"nope": 1})[0].startswith("Error"), "bad arguments -> error text, no exception")
 
@@ -141,10 +169,13 @@ async def main():
             ("What is 1234 times 5678?", "calculate", ["7006652", "7,006,652", "seven million"]),
             ("What's the latest news about NASA?", "web_search", []),
             ("Tell me a short joke.", None, []),
-            ("What time is it?", "get_current_time", []),
+            ("What time is it?", None, [time.strftime("%I:%M", time.localtime(t)).lstrip("0")  # (from the time note)
+                                        for t in (time.time(), time.time() + 60)]),
+            ("What time is it in Tokyo right now?", "get_current_time", []),
             ("Set a timer for 10 minutes.", "timer", ["10 minutes", "ten minutes"]),
             ("Actually, cancel that timer.", "timer", ["cancel"]),
         ]
+        n_general = len(cases)
         if "home_assistant" in offered:  # read-only: nothing gets switched
             cases.append(("Is the kitchen light on?", "home_assistant", ["kitchen", "off", " on"]))
         if "jellyfin" in offered:  # read-only: a library search
@@ -152,7 +183,7 @@ async def main():
         if "--hermes" in sys.argv:  # only the delegation check
             cases = []
         if "--home" in sys.argv:  # only the Home Assistant / Jellyfin checks (then Hermes)
-            cases = cases[9:]
+            cases = cases[n_general:]
         for q, want_tool, words in cases:
             r = await ask(ws, q)
             names = [t["name"] for t in r["tools"]]
@@ -178,7 +209,7 @@ async def main():
             print(f"   announced after {time.perf_counter() - t0:.0f} s: {r['text'].strip()!r} {names}")
             check("timer_done" in names and "stretch" in r["text"].lower() and r["audio_s"] > 0.5,
                   "the reminder goes off and is spoken")
-        if "ask_hermes" in offered:  # a real (harmless) task for the Hermes agent; its answer arrives on its own
+        if "ask_hermes" in offered and "--hermes" in sys.argv:  # a real (harmless) Hermes task, only when asked for
             await asyncio.sleep(1.0)
             r = await ask(ws, "Can you ask Hermes how long its server has been up?")
             names = [t["name"] for t in r["tools"]]

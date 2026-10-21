@@ -51,6 +51,18 @@ TOOLBOX = Toolbox()  # web search, weather, calculator, clock, timers, Home Assi
 NOTICES: list = []
 
 
+FATAL_GPU = re.compile(r"HIP error|CUDA error|hipBLASLt|HIPBLAS_STATUS|CUBLAS_STATUS|illegal memory access")
+
+
+def check_fatal(e: BaseException):
+    """A GPU error that leaves the device unusable (unlike torch's own out-of-memory, which the next turn survives):
+    under run.sh's supervisor (MING_SUPERVISE=1), exit so it starts a fresh server."""
+    if FATAL_GPU.search(str(e)) and not isinstance(e, torch.cuda.OutOfMemoryError) \
+            and os.environ.get("MING_SUPERVISE") == "1":
+        log(f"fatal GPU error, exiting for a restart: {str(e)[:200]}")
+        os._exit(75)
+
+
 def _notify(prompt: str, events: list, ttl: float | None = None):
     """prompt: 'what happened) what to do', completing '(Notification for you, not said by the user: '.
     ttl: drop it if it couldn't be said within this many seconds (nobody connected, a long conversation)."""
@@ -899,7 +911,11 @@ class Session:
                 with self.undo_lock:  # (an undo restores across it fine: the turns come back as text)
                     undo = self.pending_restore is not None
                 if not undo and not self._busy() and th.needs_compact():
-                    th.compact()
+                    try:
+                        th.compact()
+                    except Exception as e:  # (the next turn rolls over instead)
+                        log("compaction error:", repr(e)[:300])
+                        check_fatal(e)
         threading.Thread(target=run, daemon=True).start()
 
     def _maybe_sleep(self):
@@ -996,6 +1012,7 @@ class Session:
                         n_samples[0] += len(pcm)
                 except Exception as e:
                     log("talker error:", repr(e))
+                    check_fatal(e)
                     r.emit("json", {"type": "error", "message": f"talker: {e}"})
 
         tt = threading.Thread(target=talker_loop, daemon=True)
@@ -1032,6 +1049,7 @@ class Session:
             where = " <- ".join(f"{Path(f.filename).name}:{f.lineno} {f.name}"
                                 for f in reversed(traceback.extract_tb(e.__traceback__)[-6:]))
             log("thinker error:", repr(e)[:300], "at", where)
+            check_fatal(e)
             r.emit("json", {"type": "error", "message": f"thinker: {e}"})
         finally:
             frag_q.put(None)
@@ -1203,7 +1221,11 @@ if __name__ == "__main__":
                        ("127.0.0.1", lan.LAN_PORT)):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((host, port))
+        try:
+            s.bind((host, port))
+        except OSError as e:  # (98: run.sh's supervisor doesn't retry: a server is most likely running already)
+            log(f"cannot listen on {host}:{port} ({e.strerror}): is Ming Voice already running?")
+            sys.exit(98)
         s.set_inheritable(True)
         socks.append(s)
     lan.access_key()  # create the key file on first start

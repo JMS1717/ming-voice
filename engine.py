@@ -39,9 +39,10 @@ MAX_TOOL_ROUNDS = 3  # call -> results -> (another call -> results ...) -> answe
 TOOL_RESERVE = 1500  # context kept free for tool results when tools are on
 ROLLOVER_MAX = 4096  # at most this much earlier conversation (as text) carries over a context rollover
 COMPACT_HEADROOM = 1200  # compact between turns once less than this (+ the tool reserve) is left for the next turn
+TOOL_ANSWER_WORDS = 35  # an answer from tool results ends at the first sentence end after this many words
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are a friendly, helpful voice assistant in a live spoken conversation. "
+    "You are Ming, a friendly, helpful voice assistant in a live spoken conversation. "
     "Listen to the user's speech and reply naturally in the same language they speak. "
     "Keep replies short and conversational, usually one to three sentences, unless the user asks for more detail. "
     "Use plain spoken language only: no markdown, bullet points, emojis, or code."
@@ -968,6 +969,14 @@ class Thinker:
         cancel = cancel or threading.Event()
         feats = {}
         human = ""
+        heard = {}
+
+        def said() -> str:  # what the user said (only transcribed when a tool needs it: ~0.2 s)
+            if "text" not in heard:
+                spoken = self.transcribe(wav0, max_new_tokens=60) if wav0 is not None else ""
+                heard["text"] = (spoken + " " + (user_text or "")).strip()
+            return heard["text"]
+        wav0 = wav16k
         if wav16k is not None:
             wav16k = pad_to_bucket(wav16k)
             mel = self._mel(torch.from_numpy(np.ascontiguousarray(wav16k, dtype=np.float32)).to(DEVICE),
@@ -978,12 +987,15 @@ class Thinker:
             feats = dict(audio_feats=mel.to(DTYPE),
                          audio_feats_lengths=torch.tensor([[mel.shape[1]]], dtype=torch.long))
         human += user_text or ""
-        tail = f"<role>HUMAN</role>{human}{ROLE_END}<role>ASSISTANT</role>\n<think></think>"
+        # With tools, the reply starts from a private note of the local time (asked "what time is it?", the model
+        # would rather offer to check than call get_current_time; the system prompt can't hold a changing time).
+        note = time.strftime("(It's %I:%M %p now.)").replace("s 0", "s ") if self.tools is not None else ""
+        tail = f"<role>HUMAN</role>{human}{ROLE_END}<role>ASSISTANT</role>\n<think>{note}</think>"
         n_tail = len(self.tok(tail, add_special_tokens=False).input_ids)
         rollover = ""
         reserve = TOOL_RESERVE if self.tools is not None else 0
         if self.tools is not None:
-            self.tools.new_turn()  # (a risky action asked about in an earlier turn may now be confirmed)
+            self.tools.new_turn(said)  # (a risky action asked about in an earlier turn may now be confirmed)
         budget = min(self.max_ctx // 2, ROLLOVER_MAX) - n_tail
         if self.cur_len and self.cur_len + n_tail + max_new_tokens + reserve + 8 > self.max_ctx:
             rollover = self._rollover_text(budget=budget)
@@ -1005,6 +1017,7 @@ class Thinker:
         gen: list[int] = []  # the spoken reply (text of every round, tool calls excluded)
         emitted = ""
         seen, used_tools = set(), False
+        answer_from = None  # where the answer from tool results starts in `emitted`
         try:
             for rnd in range(MAX_TOOL_ROUNDS + 1):
                 call: list[int] = []
@@ -1022,6 +1035,11 @@ class Thinker:
                         if not full.endswith("�") and len(full) > len(emitted):
                             yield full[len(emitted):]
                             emitted = full
+                            # Search results tempt it into reading out whole lists: after a tool, stop at the
+                            # first sentence end past TOOL_ANSWER_WORDS words.
+                            if (answer_from is not None and re.search(r"(?<!\d)[.!?]$|\n$", full)
+                                    and len(full[answer_from:].split()) >= TOOL_ANSWER_WORDS):
+                                break
                     tok = self._step(tok)
                 if not call or cancel.is_set():
                     break
@@ -1075,6 +1093,7 @@ class Thinker:
                 if ids.shape[1] > room:
                     break
                 tok = self._prefill(ids, {})
+                answer_from = len(emitted)
             if used_tools and not emitted.strip() and not cancel.is_set():  # tools led nowhere: don't go silent
                 sorry = "Sorry, I couldn't get that done."
                 gen += self.tok(sorry, add_special_tokens=False).input_ids

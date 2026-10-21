@@ -582,7 +582,8 @@ SPECS = [
     _fn("calculate", "Evaluate arithmetic exactly (+ - * / ** %, sqrt, sin, log, pi...). Use for any calculation "
         "beyond simple mental math.",
         {"expression": {"type": "string", "description": "e.g. '17*23', 'sqrt(2)' or '15% of 80'"}}, ["expression"]),
-    _fn("get_current_time", "The current date and time (the user's local time unless a time zone is given).",
+    _fn("get_current_time", "The current date and time in another time zone (the user's local time is already in "
+        "your note).",
         {"timezone": {"type": "string", "description": "optional IANA time zone, e.g. 'Asia/Tokyo'"}}, []),
     _fn("timer", "Timers and reminders: set one ('set a timer for 10 minutes', 'remind me to call mom at 5 pm'), "
         "list them with the time left, or cancel one. When it goes off you will be told, and tell the user.",
@@ -613,23 +614,39 @@ def is_risky(command: str) -> bool:
     c = command.strip().lower()
     question = c.endswith("?") or re.match(r"(is|are|was|did|does|do|what|which|how|who|when|why)\b", c)
     return bool(RISKY_RE.search(c)) and not question
-JELLYFIN_SPEC = _fn("jellyfin", "The user's Jellyfin media server (movies, shows, music): search the library, play "
-                    "something on a device where the Jellyfin app is open (a show continues with the next episode), "
-                    "pause/resume/stop/next/previous, what's playing, which devices are available.",
+JELLYFIN_SPEC = _fn("jellyfin", "Control the user's Jellyfin media player for watching or listening: play a movie, "
+                    "show or music they name on a device where the Jellyfin app is open (a show continues with the "
+                    "next episode), pause/resume/stop/next/previous, what's playing, which devices are available, or "
+                    "whether a title is in their library. Use it only when the user talks about watching or "
+                    "listening to something.",
                     {"action": {"type": "string", "enum": ["search", "play", "pause", "resume", "stop", "next",
                                                            "previous", "now_playing", "devices"]},
                      "query": {"type": "string", "description": "title, show, artist or album (search and play)"},
                      "device": {"type": "string", "description": "optional device name, e.g. 'TV' or 'phone'"}},
                     ["action"])
-HERMES_SPEC = _fn("ask_hermes", "Delegate a task to Hermes, the user's more capable AI agent on their home server "
-                  "(always use this when the user says to ask Hermes; it can also check and manage the user's "
-                  "computers and servers), "
-                  "for anything your other tools can't do: in-depth research, comparing options, reading web pages, "
-                  "the user's files, GitHub, email, calendar, messages, Spotify, reminders and scheduled jobs, and "
-                  "multi-step work. It runs in the background (seconds to minutes) and its answer is read out when "
-                  "ready, so don't wait for it. For simply switching devices, use home_assistant instead.",
+HERMES_SPEC = _fn("ask_hermes", "Hand a task to Hermes, the user's separate AI agent on their home server. Use it "
+                  "ONLY when the user says the name Hermes (e.g. 'ask Hermes to ...'); never on your own, and never "
+                  "for questions you can answer yourself or with your other tools. It runs in the background "
+                  "(seconds to minutes) and its answer is read out when ready, so don't wait for it.",
                   {"task": {"type": "string", "description": "the complete task, with all details from the conversation"}},
                   ["task"])
+# The old behaviour (Ming hands anything its tools can't do to Hermes on its own): MING_HERMES_AUTO=1
+HERMES_AUTO_SPEC = _fn("ask_hermes", "Delegate a task to Hermes, the user's more capable AI agent on their home "
+                       "server (always use this when the user says to ask Hermes; it can also check and manage the "
+                       "user's computers and servers), for anything your other tools can't do: in-depth research, "
+                       "comparing options, reading web pages, the user's files, GitHub, email, calendar, messages, "
+                       "Spotify, reminders and scheduled jobs, and multi-step work. It runs in the background (seconds "
+                       "to minutes) and its answer is read out when ready, so don't wait for it. For simply switching "
+                       "devices, use home_assistant instead.", HERMES_SPEC["function"]["parameters"]["properties"],
+                       ["task"])
+PLAY_RE = re.compile(r"\b(play|watch|put on|throw on|listen|start|resume|continue|queue|shuffle|next episode)", re.I)
+MEDIA_RE = re.compile(PLAY_RE.pattern[:-1] + r"|jellyfin|movie|film|show|series|season|episode|song|music|album|"
+                      r"artist|track|pause|stop|skip|next|previous|back|playing|library|tv|seen|have)", re.I)
+HERMES_NAME_RE = re.compile(r"\b(h[eu]rm[eèéi]|erm[eè]s)", re.I)  # (and how ASR writes it: Hermès, Hermies, ...)
+
+
+def hermes_auto() -> bool:
+    return os.environ.get("MING_HERMES_AUTO", "0") == "1"
 _IMPL = {"web_search": web_search, "get_weather": get_weather, "calculate": calculate,
          "get_current_time": get_current_time, "home_assistant": home_assistant, "jellyfin": jellyfin}
 # Tools that change something: never run for a speculative reply (only once the user's turn has really ended)
@@ -647,7 +664,7 @@ class Toolbox:
             specs = SPECS + ([HA_SPEC] if ha_token() else []) + ([JELLYFIN_SPEC] if jellyfin_config() else [])
             hermes = hermes_config()
             if hermes:  # (optional "about" in .hermes.json: e.g. which servers it runs on)
-                specs = specs + [json.loads(json.dumps(HERMES_SPEC))]
+                specs = specs + [json.loads(json.dumps(HERMES_AUTO_SPEC if hermes_auto() else HERMES_SPEC))]
                 if hermes.get("about"):
                     specs[-1]["function"]["description"] += " " + hermes["about"]
         self.specs = list(specs)
@@ -658,9 +675,11 @@ class Toolbox:
         self.timers = Timers()  # (the server starts it: Timers.start(on_fire))
         self.turn = 0  # conversation turns (Thinker.stream): a confirmation has to come in a later turn
         self._confirm = None  # (command, turn, time) of a risky action waiting for the user's yes
+        self.heard = None  # () -> what the user said this turn (transcribed on first use; Thinker.stream sets it)
 
-    def new_turn(self):
+    def new_turn(self, heard=None):
         self.turn += 1
+        self.heard = heard
 
     def signature(self) -> str:
         """What the system prompt depends on (a change means rebuilding the context)."""
@@ -673,7 +692,7 @@ class Toolbox:
     def run(self, name: str, args: dict, cancel: threading.Event | None = None) -> tuple[str, dict]:
         """-> (result text for the model, info for the UI: query/sources/elapsed/error)"""
         t0 = time.perf_counter()
-        impl = ({**_IMPL, "ask_hermes": self._ask_hermes, "timer": self._timer,
+        impl = ({**_IMPL, "ask_hermes": self._ask_hermes, "timer": self._timer, "jellyfin": self._jellyfin,
                  "home_assistant": self._home_assistant}).get(name) if name in self.names else None
         if impl is None:
             return f"Error: there is no tool named {name!r}.", {"error": "unknown tool"}
@@ -715,6 +734,16 @@ class Toolbox:
         return (f"Not done yet: this needs the user's confirmation, and you asked them: \"{say}\" If they say yes, "
                 f"call home_assistant again with the same command and confirmed=true; otherwise don't.",
                 {"say": say, "needs_confirmation": True})
+
+    # -- Jellyfin: playback only when the user asked for it ("tell me a joke" once tried to play "Joke & Dagger") --
+    def _jellyfin(self, action: str = "", query: str = "", device: str = "") -> tuple[str, dict]:
+        if self.heard is not None:
+            said = self.heard() or ""
+            play = str(action).strip().lower() == "play"
+            if not (PLAY_RE if play else MEDIA_RE).search(said):
+                return ("Not done: the user isn't asking about watching or listening to something. Don't use "
+                        "jellyfin; answer what they asked yourself, right now."), {"refused": True, "heard": said}
+        return jellyfin(action=action, query=query, device=device)
 
     # -- timers and reminders (they go off through Timers.on_fire) --
     def _timer(self, action: str = "set", when: str = "", message: str = "") -> tuple[str, dict]:
@@ -767,6 +796,11 @@ class Toolbox:
         task = (task or "").strip()
         if not task:
             return "Error: empty task.", {}
+        if not hermes_auto() and self.heard is not None:
+            said = self.heard() or ""
+            if not HERMES_NAME_RE.search(said):  # the model reached for Hermes on its own: not wanted
+                return ("Not sent: the user did not ask for Hermes, so don't use it. Answer the user now yourself, "
+                        "or with your other tools; if you can't, say so briefly."), {"refused": True, "heard": said}
         if time.time() - self._last_delegation < 20:  # the model sometimes calls it again right after
             return "Already passed to Hermes.", {"duplicate": True, "say": "Hermes is already on it."}
         self._last_delegation = time.time()
@@ -822,10 +856,12 @@ def tool_guidance(home: str = "") -> str:
     where = f" The user is in {home}." if home else ""
     return (f"Today is {today}.{where} You have tools, but most questions don't need one: answer general knowledge "
             "(geography, science, history, well-known facts), advice, explanations, stories, jokes and conversation "
-            "yourself, without tools and without mentioning them. Call a tool only when the answer depends on live or "
-            "recent information (news, weather, prices, scores, recent events), on the current time, or on exact "
+            "yourself, without tools and without mentioning them (when asked for a joke, just tell one). Call a tool "
+            "only when the answer depends on live or "
+            "recent information (news, weather, prices, scores, recent events), on the time in another place, or on exact "
             "arithmetic, or when the user asks you to do something a tool does (timers and reminders, devices, "
-            "media). You do not know the current time: use get_current_time for it. After a tool returns, answer "
+            "media). Your private note at the start of each reply has the user's local time; use get_current_time "
+            "only for the time somewhere else. After a tool returns, answer "
             "from its results in one or two short spoken sentences, never reading out URLs, citation numbers or lists. "
             "If the results don't answer the question, say so briefly.")
 

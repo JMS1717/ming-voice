@@ -62,7 +62,7 @@ if ($Phone) { Start-PhoneAccess }
 if ($h -and $h.ready) { if ($Headless) { Start-Client } else { Start-Process $url }; exit 0 }
 
 if (-not $h) {
-    $cmd = "PORT=$port $dir/run.sh 2>&1 | grep --line-buffered -vE 'Warning|warn\(|bos_token|eos_token|scaled_dot|theta is None' | tee $dir/server.log"
+    $cmd = "PORT=$port MING_SUPERVISE=1 $dir/run.sh 2>&1 | grep --line-buffered -vE 'Warning|warn\(|bos_token|eos_token|scaled_dot|theta is None' | tee $dir/server.log"
     Start-Process -FilePath 'wsl.exe' -ArgumentList @('-d', $distro, '--', 'bash', '-lc', "`"$cmd`"") -WindowStyle $(if ($Headless) { 'Minimized' } else { 'Normal' })
 }
 

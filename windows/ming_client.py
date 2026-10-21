@@ -66,6 +66,37 @@ def _device(name):
     raise SystemExit(f"no audio device matching {name!r} (see --list-devices)")
 
 
+def _device_name(index, kind="input") -> str:
+    try:
+        import sounddevice as sd
+        return sd.query_devices(index, None if index is not None else kind)["name"]
+    except Exception:
+        return "?"
+
+
+def test_mics(seconds=3.0):
+    """Every microphone's level for a few seconds (one entry per device: the MME list), to pick input_device."""
+    import sounddevice as sd
+    mme = next((i for i, h in enumerate(sd.query_hostapis()) if h["name"] == "MME"), None)
+    default = sd.default.device[0]
+    print(f"Listening to each microphone for {seconds:.0f} s: talk, or tap the desk.\n")
+    for i, d in enumerate(sd.query_devices()):
+        if d["max_input_channels"] < 1 or (mme is not None and d["hostapi"] != mme) or "Mapper" in d["name"]:
+            continue
+        try:
+            x = sd.rec(int(seconds * 16000), samplerate=16000, channels=1, dtype="int16", device=i, blocking=True)
+            peak = int(np.abs(x).max())
+        except Exception as e:
+            print(f"  {i:3} {d['name'][:40]:42} can't open ({str(e)[:40]})")
+            continue
+        db = 20 * np.log10(max(peak, 1) / 32767)
+        bar = "#" * max(0, int((db + 80) / 2.5))
+        print(f"{'*' if i == default else ' '} {i:3} {d['name'][:40]:42} {db:6.1f} dB {bar}"
+              f"{'  (silent: muted or unused?)' if peak <= Mic.SILENT_PEAK else ''}")
+    print("\n* = Windows default. To use another: \"input_device\": \"<part of its name>\" in .client.json "
+          "(or --input-device).")
+
+
 class Player:
     """Mono PCM16 playback that can be cut off at once (an interruption, a withdrawn reply).
     With out_wav it plays into a file instead, in simulated real time (tests)."""
@@ -139,9 +170,13 @@ class Mic:
     """16 kHz PCM16 frames into an asyncio queue (oldest dropped when nobody is reading). With wav: that file,
     in real time, then silence (tests)."""
 
+    SILENT_PEAK, SILENT_WARN_S = 8, 600  # (a working mic in a quiet room still peaks well above 8 of 32767)
+
     def __init__(self, loop, device=None, wav: str | None = None):
         self.loop, self.q = loop, asyncio.Queue(maxsize=64)
         self.stream = None
+        self.device = device
+        self.loud_at, self.warned = time.monotonic(), False
         if wav:
             threading.Thread(target=self._from_wav, args=(wav,), daemon=True).start()
         else:
@@ -151,6 +186,16 @@ class Mic:
             self.stream.start()
 
     def _put(self, b: bytes):
+        now = time.monotonic()  # a muted or idle microphone (e.g. the VR headset's while it's off) hears nothing
+        if np.abs(np.frombuffer(b, np.int16)).max(initial=0) > self.SILENT_PEAK:
+            if self.warned:
+                log("the microphone hears sound again")
+            self.loud_at, self.warned = now, False
+        elif not self.warned and now - self.loud_at > self.SILENT_WARN_S:
+            self.warned = True
+            log(f"the microphone ({_device_name(self.device, 'input')}) has been silent for "
+                f"{self.SILENT_WARN_S // 60} minutes: muted, or the wrong one? Try: ming_client.py --test-mics")
+
         def put():
             if self.q.full():
                 self.q.get_nowait()
@@ -191,6 +236,9 @@ class Client:
     async def run(self, max_s: float | None = None):
         import websockets
         self.mic = Mic(asyncio.get_running_loop(), _device(self.cfg["input_device"]), self.wav)
+        if not self.wav:
+            log(f"microphone: {_device_name(self.mic.device, 'input')}; speakers: "
+                f"{_device_name(_device(self.cfg['output_device']), 'output')}")
         t_end = None if max_s is None else time.monotonic() + max_s
         warned = False
         while t_end is None or time.monotonic() < t_end:
@@ -315,6 +363,7 @@ def main():
     ap.add_argument("--output-device", help="speakers: number or part of its name")
     ap.add_argument("--barge-in", action="store_true", default=None, help="keep the mic on while it talks (headset)")
     ap.add_argument("--list-devices", action="store_true")
+    ap.add_argument("--test-mics", action="store_true", help="show each microphone's level, to pick one")
     ap.add_argument("--stop", action="store_true", help="stop the client running in the background")
     ap.add_argument("--log", help="log file (default: the console, or windows/ming_client.log without one)")
     ap.add_argument("--wav", help=argparse.SUPPRESS)  # tests: this file instead of the microphone
@@ -325,6 +374,9 @@ def main():
     if a.list_devices:
         import sounddevice as sd
         print(sd.query_devices())
+        return
+    if a.test_mics:
+        test_mics()
         return
     if a.stop:
         probe = _single_instance()  # (a free lock port: nothing running, and the pid file may be stale)
