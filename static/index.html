@@ -72,6 +72,10 @@
   .msg .meta button { border: none; background: none; color: var(--muted); cursor: pointer; padding: 0 2px; font-size: 12px; }
   .msg .meta button:hover { color: var(--accent); }
   .msg.user.pending .txt { color: var(--muted); font-style: italic; }
+  .msg .tools { font-size: 12px; color: var(--muted); margin-bottom: 6px; white-space: normal; display: flex; flex-direction: column; gap: 3px; }
+  .msg .tools details { display: inline; margin-left: 6px; }
+  .msg .tools summary { display: inline; cursor: pointer; color: var(--accent); }
+  .msg .tools a { display: block; color: var(--accent); margin: 3px 0 0 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .msg.typing .txt::after { content: "▍"; animation: blink 1s steps(2) infinite; color: var(--muted); }
   @keyframes blink { 50% { opacity: 0; } }
   .composer { border-top: 1px solid var(--line); background: var(--panel); padding: 10px 18px; }
@@ -246,6 +250,8 @@
       </details>
       <label class="check"><input type="checkbox" id="barge" checked> Interrupt the assistant by talking (barge-in)</label>
       <label class="check" title="The server compares what the microphone hears with what it just played, so the assistant's own voice coming out of a speaker doesn't count as you talking. Turn off only if it ignores you when you talk over it."><input type="checkbox" id="echo" checked> Ignore the assistant's own voice (speakerphone echo)</label>
+      <label class="check" title="The assistant can search the web (DuckDuckGo), check the weather (Open-Meteo), calculate and tell the time. Only the search terms leave this computer, never your voice."><input type="checkbox" id="tools" checked> Web search &amp; tools (weather, calculator, time)</label>
+      <div class="field"><span>Your location (for the weather)</span><input id="home" type="text" placeholder="e.g. Seattle, WA" autocomplete="off"></div>
 
       <h3>Timing</h3>
       <label class="check" title="A small model listens to how you said it (words and intonation) and answers sooner when you've clearly finished, or waits longer (up to 1.5 s) when you sound mid-sentence."><input type="checkbox" id="smart" checked> Smart turn detection</label>
@@ -330,10 +336,12 @@ for (const id of Object.keys(SL)) {
   const upd = () => { $(id + 'v').textContent = SL[id]($(id).value); store.set(id, $(id).value); if (id === 'vol') applyVol(); else sendCfg(); };
   $(id).addEventListener('input', upd); upd();
 }
-for (const id of ['barge', 'echo', 'smart', 'aec', 'ns', 'agc']) {
+for (const id of ['barge', 'echo', 'smart', 'tools', 'aec', 'ns', 'agc']) {
   $(id).checked = store.get(id, $(id).checked);
-  $(id).addEventListener('change', () => { store.set(id, $(id).checked); if (id === 'barge' || id === 'echo' || id === 'smart') sendCfg(); else if (running) restartMic(); });
+  $(id).addEventListener('change', () => { store.set(id, $(id).checked); if (['barge', 'echo', 'smart', 'tools'].includes(id)) sendCfg(); else if (running) restartMic(); });
 }
+$('home').value = store.get('home', '');
+$('home').addEventListener('change', () => { store.set('home', $('home').value.trim()); sendCfg(); });
 $('voice').addEventListener('change', () => { store.set('voice', $('voice').value); sendCfg(); });
 function applyVol() { if (outGain) outGain.gain.value = $('vol').value / 100; }
 function setMode(m) {
@@ -345,7 +353,7 @@ function setMode(m) {
 $('modeSeg').addEventListener('click', (e) => { if (e.target.dataset.mode) setMode(e.target.dataset.mode); });
 function sendCfg() {
   if (!ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({ type: 'config', voice: $('voice').value, barge_in: $('barge').checked, echo_guard: $('echo').checked, smart_turn: $('smart').checked, mode,
+  ws.send(JSON.stringify({ type: 'config', voice: $('voice').value, barge_in: $('barge').checked, echo_guard: $('echo').checked, smart_turn: $('smart').checked, tools: $('tools').checked, home: $('home').value.trim(), mode,
     end_ms: +$('end').value, short_extra_ms: +$('short').value, spec_ms: +$('spec').value, resume_ms: +$('resume').value, threshold: +$('th').value }));
 }
 $('preset').value = store.get('preset', 'assistant');
@@ -590,6 +598,32 @@ function addMsg(cls, text) {
   const m = document.createElement('div'); m.className = 'meta'; d.appendChild(m);
   $('log').appendChild(d); scrollLog(); return d;
 }
+const TOOL_ICON = { web_search: '🔎', get_weather: '🌤', calculate: '🧮', get_current_time: '🕒', home_assistant: '🏠', jellyfin: '🎬', ask_hermes: '🤖', hermes_result: '🤖' };
+function showTool(msgEl, m) {  // a tool call shown above the reply: what it looked up, and the sources
+  let box = msgEl.querySelector('.tools');
+  if (!box) { box = document.createElement('div'); box.className = 'tools'; msgEl.prepend(box); }
+  const key = m.name + JSON.stringify(m.args || {});
+  let row = [...box.children].find((r) => r.dataset.key === key);
+  if (!row) { row = document.createElement('div'); row.dataset.key = key; box.appendChild(row); }
+  const a = m.args || {}, what = a.query || a.location || a.expression || a.command || a.task || a.timezone || '';
+  const verb = { web_search: ['Searching', 'Searched'], get_weather: ['Checking the weather', 'Weather'],
+                 calculate: ['Calculating', 'Calculated'], get_current_time: ['Checking the time', 'Checked the time'],
+                 home_assistant: ['Home Assistant', 'Home Assistant'], ask_hermes: ['Asking Hermes', 'Passed to Hermes'], jellyfin: ['Jellyfin', 'Jellyfin'],
+                 hermes_result: ['Hermes finished', 'Hermes finished'] }[m.name] || [m.name, m.name];
+  row.textContent = `${TOOL_ICON[m.name] || '🛠'} ${verb[m.status === 'done' ? 1 : 0]}${what ? ': ' + what : ''}${m.status === 'done' ? '' : '…'}`;
+  if (m.status === 'done' && m.error) row.textContent += ' (failed)';
+  if (m.status === 'done' && (m.sources || []).length) {
+    const d = document.createElement('details'), s = document.createElement('summary');
+    s.textContent = `${m.sources.length} source${m.sources.length > 1 ? 's' : ''}`; d.appendChild(s);
+    for (const src of m.sources) {
+      if (!/^https?:\/\//.test(src.url || '')) continue;
+      const l = document.createElement('a'); l.href = src.url; l.target = '_blank'; l.rel = 'noopener noreferrer';
+      l.textContent = src.title || src.url; d.appendChild(l);
+    }
+    row.appendChild(d);
+  }
+  scrollLog();
+}
 function scrollLog() { const w = $('logWrap'); if (w.scrollHeight - w.scrollTop - w.clientHeight < 160) w.scrollTop = w.scrollHeight; }
 function wavBlob(chunks, rate) {
   const n = chunks.reduce((a, c) => a + c.length, 0), b = new ArrayBuffer(44 + n * 2), v = new DataView(b);
@@ -658,6 +692,7 @@ function connect() {
         botText += m.delta;
         if (botMsg) { botMsg.querySelector('.txt').textContent = botText; scrollLog(); }
         break;
+      case 'tool': if (botMsg) showTool(botMsg, m); break;
       case 'interrupt':
         stopPlayback(); finishBot(true); restState(); break;
       case 'retract': {  // you kept talking right after it started answering: that reply is withdrawn and
@@ -690,6 +725,7 @@ function connect() {
 }
 function restoreHistory(hist) {
   for (const h of hist) {
+    if ((h.user || '').startsWith('(Notification')) { if (h.assistant) addMsg('bot', '🤖 ' + h.assistant).querySelector('.meta').textContent = 'earlier'; continue; }
     const u = addMsg('user', h.user || '🎙 Voice message');
     u.querySelector('.meta').textContent = 'earlier';
     transcript.push({ role: 'user', text: h.user || '(voice)' });

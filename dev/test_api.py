@@ -1,7 +1,7 @@
 """Exercise the OpenAI-compatible API against a running server (stdlib only, so it doubles as a usage example).
 
     python dev/test_api.py                                  # http://localhost:8000
-    BASE=https://192.168.1.206:8443 KEY=<key> python dev/test_api.py   # through the phone/LAN entry point
+    BASE=https://<pc-ip>:8443 KEY=<key> python dev/test_api.py   # through the phone/LAN entry point
 """
 import base64, io, json, os, ssl, sys, time, uuid, urllib.error, urllib.request, wave
 

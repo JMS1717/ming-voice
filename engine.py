@@ -34,6 +34,9 @@ DEVICE = torch.device("cuda:0")
 DTYPE = torch.bfloat16
 EOS_IDS = {156892, 156895}
 ROLE_END = "<|role_end|>"
+TOOL_CALL_ID = 156896  # <tool_call>: the model wants to call a function instead of answering (tools.py)
+MAX_TOOL_ROUNDS = 3  # call -> results -> (another call -> results ...) -> answer
+TOOL_RESERVE = 1500  # context kept free for tool results when tools are on
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a friendly, helpful voice assistant in a live spoken conversation. "
@@ -567,6 +570,9 @@ class Thinker:
         self._mel = whisper.log_mel_spectrogram
         self.n_mels = getattr(self.model.config.audio_config, "n_mels", 128)
         self.system_prompt = system_prompt
+        self.tools = None  # tools.Toolbox offered to the model (part of the system prompt: change -> reset)
+        self._tools_sig = None
+        self._sys_cache = {}  # system block text -> saved cache state (_prefill_system)
         # smaller default context in low-VRAM (int8) mode: the MLA cache is ~60 MB per 1k tokens
         self.max_ctx = int(os.environ.get("MING_MAX_CTX", "4096" if self.int8_experts else "8192"))
         self._build_cache()
@@ -731,22 +737,46 @@ class Thinker:
         """Run a stateless request (API chat) on the fast cached path without disturbing the live
         conversation: saves the whole state (recurrent states + the filled MLA KV prefix), restores it after.
         The caller must hold the GPU lock."""
-        n = self.cur_len
-        saved = [(st.keys.clone(), tuple(c.clone() for c in st.values)) if isinstance(st, _KDAState)
-                 else (st.k[:, :, :n].clone(), st.v[:, :, :n].clone()) for st in self._layers]
-        meta = (self.cur_len, self.pending, list(self.history), self.system_prompt, self.epoch, self.rebuild)
+        saved = self._save_state()
+        meta = (self.pending, list(self.history), self.system_prompt, self.epoch, self.rebuild, self.tools, self._tools_sig)
         try:
             yield self
         finally:
-            for st, (a, b) in zip(self._layers, saved):
-                if isinstance(st, _KDAState):
-                    st.keys.copy_(a)
-                    for dst, src in zip(st.values, b):
-                        dst.copy_(src)
-                else:
-                    st.k[:, :, :n].copy_(a)
-                    st.v[:, :, :n].copy_(b)
-            self.cur_len, self.pending, self.history, self.system_prompt, self.epoch, self.rebuild = meta
+            self._load_state(saved)
+            self.pending, self.history, self.system_prompt, self.epoch, self.rebuild, self.tools, self._tools_sig = meta
+
+    def _save_state(self):
+        """Copy of the whole cache state: recurrent KDA states + the filled part of the MLA KV cache."""
+        n = self.cur_len
+        return n, [(st.keys.clone(), tuple(c.clone() for c in st.values)) if isinstance(st, _KDAState)
+                   else (st.k[:, :, :n].clone(), st.v[:, :, :n].clone()) for st in self._layers]
+
+    def _load_state(self, saved):
+        n, layers = saved
+        for st, (a, b) in zip(self._layers, layers):
+            if isinstance(st, _KDAState):
+                st.keys.copy_(a)
+                for dst, src in zip(st.values, b):
+                    dst.copy_(src)
+            else:
+                st.k[:, :, :n].copy_(a)
+                st.v[:, :, :n].copy_(b)
+        self.cur_len = n
+
+    def _prefill_system(self):
+        """Start a fresh context with the system prompt. Its cache state is kept (two most recent prompts), so a new
+        chat doesn't prefill the persona + tool definitions (~900 tokens) again."""
+        text = self._system_block()
+        hit = self._sys_cache.pop(text, None)
+        if hit is not None:
+            self._load_state(hit)
+        else:
+            ids = self.tok(text, return_tensors="pt", add_special_tokens=True).input_ids.to(DEVICE)
+            self._prefill(ids, {})
+            hit = self._save_state()
+        self._sys_cache[text] = hit
+        while len(self._sys_cache) > 2:
+            self._sys_cache.pop(next(iter(self._sys_cache)))
 
     def restore(self, snap):
         if snap["epoch"] != self.epoch:
@@ -823,7 +853,22 @@ class Thinker:
 
     def _system_block(self):
         sp = self.system_prompt.rstrip()
-        return f"<role>SYSTEM</role>{sp}\ndetailed thinking off{ROLE_END}"
+        tools = ""
+        if self.tools is not None:
+            from tools import system_tools_block, tool_guidance
+            tools = tool_guidance(self.tools.home) + "\n" + system_tools_block(self.tools.specs)
+        return f"<role>SYSTEM</role>{sp}\n{tools}detailed thinking off{ROLE_END}"
+
+    def set_tools(self, tools):
+        """Offer a different set of tools (None = none). They live in the cached system prompt, so when they (or the
+        user's location) change, the context is rebuilt from the conversation's text on the next turn."""
+        sig = None if tools is None else tools.signature()
+        changed = sig != self._tools_sig
+        self.tools, self._tools_sig = tools, sig
+        if changed and self.cur_len:
+            hist = self.history
+            self.reset()
+            self.history, self.rebuild = hist, bool(hist)
 
     def ctx_len(self):
         return self.cur_len
@@ -879,9 +924,13 @@ class Thinker:
 
     @torch.inference_mode()
     def stream(self, wav16k: np.ndarray, cancel: threading.Event | None = None, max_new_tokens: int = 400,
-               user_text: str | None = None, history_text: str = ""):
+               user_text: str | None = None, history_text: str = "", events: bool = False, gate=None):
         """Yield text deltas of the assistant reply to one user utterance (16 kHz mono float32) and/or text.
-        history_text: earlier turns (render_history) inserted after the system prompt on a fresh context."""
+        history_text: earlier turns (render_history) inserted after the system prompt on a fresh context.
+        With self.tools set, the model may call tools first; they run here (GPU idle meanwhile) and the reply
+        continues from their results. events=True also yields {"type": "tool_call" | "tool_result", ...} dicts.
+        gate(): called before a tool that changes something (tools.SIDE_EFFECTS); blocks until the reply is
+        confirmed and returns False if it was dropped (speculative replies), which ends the reply there."""
         cancel = cancel or threading.Event()
         feats = {}
         human = ""
@@ -898,7 +947,8 @@ class Thinker:
         tail = f"<role>HUMAN</role>{human}{ROLE_END}<role>ASSISTANT</role>\n<think></think>"
         n_tail = len(self.tok(tail, add_special_tokens=False).input_ids)
         rollover = ""
-        if self.cur_len and self.cur_len + n_tail + max_new_tokens + 8 > self.max_ctx:
+        reserve = TOOL_RESERVE if self.tools is not None else 0
+        if self.cur_len and self.cur_len + n_tail + max_new_tokens + reserve + 8 > self.max_ctx:
             rollover = self._rollover_text(budget=self.max_ctx // 2 - n_tail)
             log(f"context limit reached: restarting from the last turns as text ({len(rollover)} chars)")
             hist = self.history
@@ -907,21 +957,91 @@ class Thinker:
         elif self.cur_len == 0 and self.rebuild and self.history:
             rollover = self._rollover_text(budget=self.max_ctx // 2 - n_tail)
         self.rebuild = False
-        first = self.cur_len == 0
-        prefix = (self._system_block() + (rollover or history_text)) if first else (self.pending or "")
-        ids = self.tok(prefix + tail, return_tensors="pt", add_special_tokens=first).input_ids.to(DEVICE)
+        if self.cur_len == 0:
+            self._prefill_system()
+            prefix = rollover or history_text
+        else:
+            prefix = self.pending or ""
+        ids = self.tok(prefix + tail, return_tensors="pt", add_special_tokens=False).input_ids.to(DEVICE)
         max_new_tokens = min(max_new_tokens, self.max_ctx - self.cur_len - ids.shape[1] - 1)
         tok = self._prefill(ids, feats)
-        gen: list[int] = []
+        gen: list[int] = []  # the spoken reply (text of every round, tool calls excluded)
         emitted = ""
+        seen, used_tools = set(), False
         try:
-            while tok not in EOS_IDS and len(gen) < max_new_tokens and not cancel.is_set():
-                gen.append(tok)
-                full = self.tok.decode(gen, skip_special_tokens=True)
-                if not full.endswith("�") and len(full) > len(emitted):
-                    yield full[len(emitted):]
-                    emitted = full
-                tok = self._step(tok)
+            for rnd in range(MAX_TOOL_ROUNDS + 1):
+                call: list[int] = []
+                n = 0
+                limit = min(max_new_tokens, self.max_ctx - self.cur_len - 2)
+                while tok not in EOS_IDS and n < limit and not cancel.is_set():
+                    n += 1
+                    if tok == TOOL_CALL_ID and rnd == MAX_TOOL_ROUNDS:
+                        break  # yet another call after the last allowed round: end the reply (never speak it)
+                    if call or (tok == TOOL_CALL_ID and self.tools is not None):
+                        call.append(tok)  # a function call: collected, not spoken
+                    else:
+                        gen.append(tok)
+                        full = self.tok.decode(gen, skip_special_tokens=True)
+                        if not full.endswith("�") and len(full) > len(emitted):
+                            yield full[len(emitted):]
+                            emitted = full
+                    tok = self._step(tok)
+                if not call or cancel.is_set():
+                    break
+                from tools import parse_tool_calls
+                calls = parse_tool_calls(self.tok.decode(call, skip_special_tokens=False))[:3]
+                calls = [c for c in calls if repr(c) not in seen]  # the same call again won't go differently
+                if not calls:
+                    break
+                seen.update(repr(c) for c in calls)
+                used_tools = True
+                from tools import SIDE_EFFECTS
+                if gate is not None and any(n in SIDE_EFFECTS for n, _ in calls) and not gate():
+                    break  # a speculative reply that was dropped: never switch lights or start tasks for it
+                results, says = [], []
+                for name, args in calls:
+                    if events:
+                        yield {"type": "tool_call", "name": name, "args": args}
+                    text, info = self.tools.run(name, args, cancel)
+                    log(f"tool {name}({args}) -> {len(text)} chars in {info.get('elapsed_ms')} ms")
+                    if events:
+                        yield {"type": "tool_result", "name": name, "args": args, **info}
+                    results.append(text)
+                    says.append(info.get("say"))
+                if cancel.is_set():
+                    break
+                if all(says):
+                    # fire-and-forget tools (a task handed to Hermes) come with their own short acknowledgement:
+                    # say it and end the turn (the model tends to call them again instead of answering)
+                    say = " ".join(says)
+                    obs = (ROLE_END + "<role>OBSERVATION</role>"
+                           + "".join(f"\n<tool_response>\n{r}\n</tool_response>" for r in results)
+                           + ROLE_END + "<role>ASSISTANT</role>\n<think></think>")
+                    o_ids = self.tok(obs, add_special_tokens=False).input_ids
+                    s_ids = self.tok(say, add_special_tokens=False).input_ids
+                    if self.cur_len + len(o_ids) + len(s_ids) + 8 < self.max_ctx:
+                        self._prefill(torch.tensor([o_ids + s_ids], device=DEVICE), {})  # (the reply, as said)
+                        gen += s_ids
+                    yield (" " if emitted else "") + say
+                    emitted += say
+                    break
+                # the role_end after </tool_call> was sampled but not fed; the results come back as an observation
+                room = self.max_ctx - self.cur_len - min(max_new_tokens, 200) - 16
+                while True:
+                    obs = (ROLE_END + "<role>OBSERVATION</role>"
+                           + "".join(f"\n<tool_response>\n{r}\n</tool_response>" for r in results)
+                           + ROLE_END + "<role>ASSISTANT</role>\n<think></think>")
+                    ids = self.tok(obs, return_tensors="pt", add_special_tokens=False).input_ids.to(DEVICE)
+                    if ids.shape[1] <= room or max(map(len, results)) < 200:
+                        break
+                    results = [r[: len(r) * 2 // 3] for r in results]  # too long for what's left of the context
+                if ids.shape[1] > room:
+                    break
+                tok = self._prefill(ids, {})
+            if used_tools and not emitted.strip() and not cancel.is_set():  # tools led nowhere: don't go silent
+                sorry = "Sorry, I couldn't get that done."
+                gen += self.tok(sorry, add_special_tokens=False).input_ids
+                yield sorry
         finally:
             # The last sampled token (EOS or the interrupted one) was never fed; close the turn.
             self.pending = ROLE_END

@@ -42,6 +42,25 @@ import api
 import lan
 from echo_guard import EchoGuard
 from engine import DEFAULT_SYSTEM_PROMPT, Fragmenter, GpuKeepAwake, Talker, Thinker, log
+from tools import FILLERS, Toolbox
+
+TOOLBOX = Toolbox()  # web search, weather, calculator, clock, Home Assistant, Hermes (when the session enables tools)
+NOTICES: list = []  # finished Hermes tasks waiting to be announced: (prompt for the model, task, ok)
+
+
+def _delegate_done(task: str, ok, text: str):
+    """A Hermes run finished (ok True/False) or needs approval (ok None): have the assistant tell the user."""
+    log(f"hermes {'done' if ok else 'failed' if ok is False else 'waiting'}: {task!r} -> {text[:200]!r}")
+    what = (f'Hermes finished the task "{task}". Its answer: {text}' if ok else
+            f'Hermes could not finish the task "{task}": {text}' if ok is False else f'{text} (Task: "{task}")')
+    NOTICES.append((f"(Notification for you, not said by the user: {what}) Tell the user briefly, in your own words.",
+                    task, ok))
+    sess = ACTIVE.get("sess")
+    if sess is not None:
+        sess.loop.call_soon_threadsafe(sess.deliver_notices)
+
+
+TOOLBOX.on_delegate_done = _delegate_done
 
 ECHO_DEBUG = bool(os.environ.get("MING_ECHO_DEBUG"))
 
@@ -379,6 +398,8 @@ class Session:
         self.vad = ENGINE["vad_proto"]()
         self.voice = VOICES[0]
         self.barge_in = True
+        self.tools = True  # let the model search the web, check the weather, calculate, tell the time
+        self.home = ""  # the user's location, for "what's the weather?"
         self.end_ms = 500
         self.spec_ms = 32  # start generating speculatively after this much of a pause (0 = off)
         self.short_extra_ms = 250  # extra end-of-turn wait when the utterance is under 1 s of speech
@@ -428,6 +449,23 @@ class Session:
 
     def emit_json(self, obj):
         self._put("json", obj)
+
+    def deliver_notices(self):
+        """Announce finished background tasks at the next quiet moment (event loop)."""
+        if not NOTICES or ACTIVE.get("sess") is not self:
+            return
+        busy = (self.in_speech or self.responding or self.spec is not None or self.ptt_down
+                or (self.reply is not None and self.reply.active))
+        if busy:
+            self.loop.call_later(0.5, self.deliver_notices)
+            return
+        prompt, task, ok = NOTICES.pop(0)
+        r = self.start_reply(None, user_text=prompt)
+        self.emit_json({"type": "tool", "status": "done", "name": "hermes_result", "args": {"task": task},
+                        "error": None if ok or ok is None else "failed"})
+        if NOTICES:
+            self.loop.call_later(1.0, self.deliver_notices)
+        return r
 
     @property
     def responding(self):
@@ -655,6 +693,8 @@ class Session:
                 th.restore(pending)
             if r.cancel.is_set():
                 return
+            TOOLBOX.home = self.home
+            th.set_tools(TOOLBOX if self.tools else None)  # (rebuilds the context when this changed)
             snap = r.snap = th.snapshot()
             try:
                 self._generate(r, th, tk)
@@ -725,7 +765,20 @@ class Session:
         fr = Fragmenter()
         text = ""
         try:
-            for delta in th.stream(r.audio, cancel=cancel, user_text=r.user_text):
+            confirmed = lambda: r.decided.wait(30) and r.committed and not cancel.is_set()  # noqa: E731
+            for delta in th.stream(r.audio, cancel=cancel, user_text=r.user_text, events=True, gate=confirmed):
+                if isinstance(delta, dict):  # a tool call / its result
+                    if delta["type"] == "tool_call":
+                        for piece in fr.flush():  # speak what it said before calling the tool
+                            frag_q.put(piece)
+                        filler = FILLERS.get(delta["name"])
+                        if filler and not text.strip():  # it went straight to the tool: say something meanwhile
+                            text += filler + " "
+                            r.emit("json", {"type": "text", "delta": filler + " "})
+                            frag_q.put(filler)
+                    r.emit("json", {"type": "tool", "status": "running" if delta["type"] == "tool_call" else "done",
+                                    **{k: v for k, v in delta.items() if k != "type"}})
+                    continue
                 if m["first_text"] is None:
                     m["first_text"] = time.perf_counter()
                 text += delta
@@ -778,6 +831,10 @@ class Session:
                 self.spec_ms = int(max(0, min(1000, msg["spec_ms"])))
             if "resume_ms" in msg:
                 self.resume_ms = int(max(0, min(3000, msg["resume_ms"])))
+            if "tools" in msg:
+                self.tools = bool(msg["tools"])
+            if "home" in msg:
+                self.home = str(msg["home"] or "").strip()[:100]
             if "fast_end_ms" in msg:
                 self.fast_end_ms = int(max(100, min(1000, msg["fast_end_ms"])))
             if "threshold" in msg:
@@ -865,6 +922,7 @@ async def ws_endpoint(ws: WebSocket):
                 await ws.send_bytes(payload)
 
     send_task = asyncio.create_task(sender())
+    loop.call_later(1.5, sess.deliver_notices)  # background results that finished while nobody was connected
     try:
         while True:
             msg = await ws.receive()

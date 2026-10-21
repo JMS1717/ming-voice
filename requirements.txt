@@ -22,3 +22,4 @@ python-multipart==0.0.20
 segno==1.6.6
 silero-vad==6.2.3
 websockets==17.3
+ddgs==9.16.0

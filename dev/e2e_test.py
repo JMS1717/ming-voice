@@ -66,10 +66,11 @@ async def main():
     results = []
     retracts = [0]
     barge_ms = []
+    tool_calls = []  # (none of these general-knowledge questions should need a tool)
     async with websockets.connect(f"ws://{URL}/ws", max_size=2**24) as ws:
         hello = json.loads(await ws.recv())
         await ws.send(json.dumps({"type": "config", "voice": "US_Stella", "end_ms": 500, "spec_ms": int(os.environ.get("E2E_SPEC_MS", "32")),
-                                  "smart_turn": os.environ.get("E2E_SMART", "1") == "1",
+                                  "smart_turn": os.environ.get("E2E_SMART", "1") == "1", "tools": os.environ.get("E2E_TOOLS", "1") == "1",
                                   **({"fast_end_ms": int(os.environ["E2E_FAST_END"])} if "E2E_FAST_END" in os.environ else {}),
                                   "barge_in": True}))
         if os.environ.get("E2E_RESET", "1") == "1":
@@ -117,6 +118,8 @@ async def main():
                 ev = json.loads(m)
                 if ev["type"] == "text":
                     text += ev["delta"]
+                elif ev["type"] == "tool" and ev.get("status") == "done":
+                    tool_calls.append((name, ev.get("name"), ev.get("args")))
                 elif ev["type"] == "interrupt":
                     saw_interrupt = True
                     if interrupt_with is not None and sent_interrupt and mic.t_started is not None:
@@ -179,6 +182,7 @@ async def main():
     print("end of speech -> first audio byte (ms):", sl, " median", int(np.median(sl)) if sl else None)
     print("withdrawn replies (resume after a pause):", retracts[0])
     print("barge-in: start of interrupting speech -> reply stopped (ms):", barge_ms)
+    print("tool calls:", tool_calls)
     checks = {
         "every turn produced audio": all(r["audio_s"] > 0.3 for r in results[:5]),
         "capital answer mentions Paris": "paris" in (results[0]["reply_text"] + results[0]["heard"]).lower(),
@@ -187,6 +191,7 @@ async def main():
         "pause question answered (Everest)": "everest" in (results[2]["reply_text"] + results[2]["heard"] +
                                                            results[3]["reply_text"] + results[3]["heard"]).lower(),
         "barge-in interrupted the story": results[4]["saw_interrupt"],
+        "general-knowledge questions answered without tools": not tool_calls,
         # the reply to the interrupting question may be collected into the story turn or the next one
         "barge-in question answered (four)": any(w in (results[4]["reply_text"] + results[4]["heard"] +
                                                        results[5]["reply_text"] + results[5]["heard"]).lower()
