@@ -105,7 +105,9 @@ class AccessControl:
             # browser login: keep the key in a cookie and drop it from the address bar
             q.pop("key")
             loc = scope["path"] + ("?" + urlencode(q) if q else "")
-            cookie = f"{COOKIE}={key}; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Strict"
+            # Lax, not Strict: a link opened from another app (QR scanner, chat, mail) is a cross-site navigation,
+            # and browsers withhold Strict cookies from it, including on this redirect, so it would land on "denied"
+            cookie = f"{COOKIE}={key}; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Lax"
             await send({"type": "http.response.start", "status": 303,
                         "headers": [(b"location", loc.encode()), (b"set-cookie", cookie.encode()),
                                     (b"cache-control", b"no-store")]})
@@ -131,4 +133,7 @@ class AccessControl:
 _DENIED = """<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
 <title>Ming Voice</title><body style="font:16px system-ui;background:#111;color:#ddd;padding:24px;max-width:480px;margin:auto">
 <h2>Ming Voice</h2><p>This link needs the access key. On the computer running Ming Voice, open
-<b>http://localhost:8000</b>, press <b>Phone</b>, and scan the QR code (or copy the link).</p></body>"""
+<b>http://localhost:8000</b>, press <b>Phone</b>, and scan the QR code (or copy the link).</p>
+<form method=get action="/" style="display:flex;gap:8px;margin-top:20px"><input name=key placeholder="or enter the access key"
+autocomplete=off autocapitalize=off spellcheck=false style="flex:1;min-width:0;font:16px system-ui;padding:9px 12px;border-radius:10px;border:1px solid #444;background:#1b1b1b;color:#ddd">
+<button style="font:16px system-ui;padding:9px 14px;border-radius:10px;border:0;background:#7aa2ff;color:#111">Open</button></form></body>"""
