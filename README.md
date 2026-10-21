@@ -79,7 +79,7 @@ Measured on a Radeon RX 7900 XTX (24 GB):
 
 - Windows 11 with **WSL2** and **Ubuntu 24.04**
 - An AMD GPU supported by ROCm on WSL with **16 GB+ VRAM** (tested on the RX 7900 XTX) and a recent Adrenalin driver with WSL support
-- ~30 GB free disk (20 GB model + Python environment) and [uv](https://docs.astral.sh/uv/) in WSL
+- ~30 GB free disk (20 GB model + Python environment)
 
 Native Linux with ROCm is untested, but should only need the WSL-specific parts removed
 (`HSA_ENABLE_DXG_DETECTION`, the `libhsa-runtime64` removal in `setup_env.sh`, `scripts/install_rocm_wsl.sh`).
@@ -87,19 +87,38 @@ NVIDIA GPUs are not targeted.
 
 ### Install
 
-Inside WSL Ubuntu:
+Open **PowerShell** on Windows and paste:
+
+```powershell
+irm https://raw.githubusercontent.com/JMS1717/ming-voice/main/install.ps1 | iex
+```
+
+That's it. It sets up WSL and Ubuntu 24.04 if you don't have them yet, then installs ROCm, the Python
+environment and the model (~20 GB download), and puts a **Ming Voice** shortcut on your Desktop. It asks for your
+Linux password once (for ROCm). If anything stops halfway, run it again: finished steps are skipped.
+(Prefer not to paste commands? Download the repo and double-click `Install.cmd`.)
+
+Already in a WSL Ubuntu shell? Same thing from there:
 
 ```bash
 git clone https://github.com/JMS1717/ming-voice.git ~/ming-voice
-cd ~/ming-voice
-sudo bash scripts/install_rocm_wsl.sh      # ROCm 7.2.4 + librocdxg (WSL GPU bridge); log out and in afterwards
-bash setup_env.sh                          # Python env (ROCm PyTorch wheels) + model download (~20 GB)
+bash ~/ming-voice/install.sh
 ```
+
+<details>
+<summary>What the installer runs (manual install)</summary>
+
+```bash
+sudo bash scripts/install_rocm_wsl.sh      # ROCm 7.2.4 + librocdxg (WSL GPU bridge); restart WSL afterwards (wsl --shutdown)
+bash setup_env.sh                          # Python env (ROCm PyTorch wheels, needs uv) + model download (~20 GB)
+```
+
+</details>
 
 ### Run
 
-- **Windows:** double-click `windows\Ming Voice.cmd` (open the repo in Explorer at
-  `\\wsl.localhost\Ubuntu\home\<you>\ming-voice`). It starts the server, waits for the model, and opens
+- **Windows:** double-click **Ming Voice** on your Desktop (or `windows\Ming Voice.cmd` in the repo, at
+  `\\wsl.localhost\Ubuntu-24.04\home\<you>\ming-voice`). It starts the server, waits for the model, and opens
   <http://localhost:8000>.
 - **WSL shell:** `./run.sh`, then open <http://localhost:8000>.
 

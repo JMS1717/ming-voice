@@ -630,7 +630,7 @@ function addMsg(cls, text) {
   const m = document.createElement('div'); m.className = 'meta'; d.appendChild(m);
   $('log').appendChild(d); scrollLog(); return d;
 }
-const TOOL_ICON = { web_search: '🔎', get_weather: '🌤', calculate: '🧮', get_current_time: '🕒', home_assistant: '🏠', jellyfin: '🎬', ask_hermes: '🤖', hermes_result: '🤖', timer: '⏲', timer_done: '⏰', announcement: '📣' };
+const TOOL_ICON = { web_search: '🔎', get_weather: '🌤', calculate: '🧮', get_current_time: '🕒', home_assistant: '🏠', jellyfin: '🎬', ask_hermes: '🤖', hermes_result: '🤖', timer: '⏲', timer_done: '⏰', announcement: '📣', lists: '📝', memory: '🧠' };
 function showTool(msgEl, m) {  // a tool call shown above the reply: what it looked up, and the sources
   let box = msgEl.querySelector('.tools');
   if (!box) { box = document.createElement('div'); box.className = 'tools'; msgEl.prepend(box); }
@@ -638,11 +638,13 @@ function showTool(msgEl, m) {  // a tool call shown above the reply: what it loo
   let row = [...box.children].find((r) => r.dataset.key === key);
   if (!row) { row = document.createElement('div'); row.dataset.key = key; box.appendChild(row); }
   const a = m.args || {}, what = a.query || a.location || a.expression || a.command || a.task || a.timezone
-    || [a.message, a.when].filter(Boolean).join(', ') || (m.name === 'timer' && a.action !== 'set' ? a.action : '') || '';
+    || [a.message, a.when].filter(Boolean).join(', ') || (m.name === 'timer' && a.action !== 'set' ? a.action : '') || a.fact
+    || (m.name === 'lists' ? [a.action, a.items].filter(Boolean).join(' ') + (a.list ? ` (${a.list})` : '') : '') || '';
   const verb = { web_search: ['Searching', 'Searched'], get_weather: ['Checking the weather', 'Weather'],
                  calculate: ['Calculating', 'Calculated'], get_current_time: ['Checking the time', 'Checked the time'],
                  home_assistant: ['Home Assistant', 'Home Assistant'], ask_hermes: ['Asking Hermes', 'Passed to Hermes'], jellyfin: ['Jellyfin', 'Jellyfin'],
-                 hermes_result: ['Hermes finished', 'Hermes finished'], timer: ['Timer', 'Timer'], timer_done: ['Time’s up', 'Time’s up'], announcement: ['Announcement', 'Announcement'] }[m.name] || [m.name, m.name];
+                 hermes_result: ['Hermes finished', 'Hermes finished'], timer: ['Timer', 'Timer'], timer_done: ['Time’s up', 'Time’s up'], announcement: ['Announcement', 'Announcement'],
+                 lists: ['Updating your list', 'List'], memory: ['Memory', 'Memory'] }[m.name] || [m.name, m.name];
   row.textContent = `${TOOL_ICON[m.name] || '🛠'} ${verb[m.status === 'done' ? 1 : 0]}${what ? ': ' + what : ''}${m.status === 'done' ? '' : '…'}`;
   if (m.status === 'done' && m.error) row.textContent += ' (failed)';
   if (m.status === 'done' && (m.sources || []).length) {

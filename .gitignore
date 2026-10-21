@@ -39,3 +39,4 @@ dev/scratch/
 .client.json
 windows/ming_client.log
 windows/.ming_client.pid
+.wsl_restart_needed
