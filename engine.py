@@ -53,6 +53,16 @@ CANT_LOOK_UP = re.compile(r"\b((live|real[- ]time|current|up[- ]to[- ]date|recen
                           r"a search engine|search(ing)? the (web|internet)|brows(e|ing)( the (web|internet))?|"
                           r"look (things|that|it) up|weather (data|forecasts?|information|updates)|"
                           r"a (weather )?forecast)\b", re.I)
+# replies that say a list or memory changed: (pattern, tool, action) to run when no tool was called
+CLAIMS = [
+    (re.compile(r"\b(off (of )?(your|the)( [\w-]+)? list|removed|crossed|no longer on|list now (only )?has)\b",
+                re.I), "lists", "remove"),
+    (re.compile(r"\b((i've|i have) forgotten|forgotten (that|it|where|what|about)|won't (remember|remind)|"
+                r"(erased|deleted) (that|it))\b", re.I), "memory", "forget"),
+    (re.compile(r"\b((added|put)\b.*\b(to|on) (your|the)( [\w-]+)? list|on (your|the)( [\w-]+)? list now)\b", re.I),
+     "lists", "add"),
+    (re.compile(r"\b(i'll|i will) remember\b", re.I), "memory", "remember"),
+]
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are Ming, a friendly, helpful voice assistant in a live spoken conversation. "
@@ -1033,7 +1043,7 @@ class Thinker:
         tool_names = {s.get("function", s).get("name") for s in self.tools.specs} if self.tools is not None else set()
         snap = self.snapshot() if "web_search" in tool_names else None
         tok = self._prefill(ids, feats)
-        held, retry, forced = snap is not None, None, None
+        held, retry, forced, quiet = snap is not None, None, None, False
         gen: list[int] = []  # the spoken reply (text of every round, tool calls excluded)
         emitted = ""
         seen, used_tools = set(), False
@@ -1105,6 +1115,18 @@ class Thinker:
                     if len(full) > len(emitted):
                         yield full[len(emitted):]
                         emitted = full
+                if not call and not used_tools and tok in EOS_IDS and not cancel.is_set():
+                    # "The eggs are off your list" without calling lists: make it true with that call (quietly,
+                    # it was already said), continuing the reply as if the model had made it
+                    full = self.tok.decode(gen, skip_special_tokens=True)
+                    claim = next(((t, a) for rx, t, a in CLAIMS if t in tool_names and rx.search(full)), None)
+                    if claim:
+                        log(f"reply claimed a {claim[0]} {claim[1]} it didn't do ({full!r}): calling it now")
+                        forced = self.tok(f"\n<tool_call>{claim[0]}\n<arg_key>action</arg_key>\n<arg_value>"
+                                          f"{claim[1]}</arg_value>\n<arg_key>", add_special_tokens=False).input_ids
+                        tok = self._prefill(torch.tensor([forced], device=DEVICE), {})
+                        quiet = True
+                        continue
                 if not call or cancel.is_set():
                     break
                 from tools import parse_tool_calls
@@ -1137,6 +1159,10 @@ class Thinker:
                            + "".join(f"\n<tool_response>\n{r}\n</tool_response>" for r in results)
                            + ROLE_END + "<role>ASSISTANT</role>\n<think></think>")
                     o_ids = self.tok(obs, add_special_tokens=False).input_ids
+                    if quiet and "n't" not in say:  # (done as the reply already said: nothing to add)
+                        if self.cur_len + len(o_ids) + 8 < self.max_ctx:
+                            self._prefill(torch.tensor([o_ids], device=DEVICE), {})
+                        break
                     s_ids = self.tok(say, add_special_tokens=False).input_ids
                     if self.cur_len + len(o_ids) + len(s_ids) + 8 < self.max_ctx:
                         self._prefill(torch.tensor([o_ids + s_ids], device=DEVICE), {})  # (the reply, as said)

@@ -18,6 +18,10 @@ certs/
 .timers.json
 .conversation.json
 .conversation.tmp
+.lists.json
+.lists.tmp
+.memory.json
+.memory.tmp
 .lan_info.json
 server.log
 *.log

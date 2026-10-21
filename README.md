@@ -24,7 +24,8 @@ typically starting to speak **~0.25 s after you stop talking**.
 * Browser client: mic / speaker selection, live levels, transcript with replay & download, personas, settings
 * **Use it from your phone** over HTTPS on your home network (QR code, access key, installable web app)
 * **OpenAI-compatible API**: text-to-speech, transcription, chat with audio in and out
-* **Tools**: web search, weather, calculator, clock, **timers and reminders** out of the box; **Home Assistant**
+* **Tools**: web search, weather, calculator, clock, **timers and reminders**, **shopping and to-do lists**, and **remembering things you tell
+  it** out of the box; **Home Assistant**
   (lights, plugs, media, thermostat, ...), **Jellyfin** and delegation to a **Hermes Agent** for bigger jobs when
   configured. The model itself decides when to call them (Ming-3.0's LLM was trained for function calling)
 * English and Chinese (the model's languages)
@@ -144,11 +145,13 @@ With **Web search & tools** on (Settings, default), the assistant can call tools
 | `get_weather` | Current weather and 3-day forecast (Open-Meteo, no key); "Your location" in Settings is the default | – |
 | `calculate`, `get_current_time` | Exact arithmetic; the time in other time zones (the local time comes with every turn, so "what time is it?" needs no tool) | – |
 | `timer` | "Set a timer for 10 minutes", "remind me to call mom at 5 pm", "how long is left?", "cancel the pasta timer". When one goes off the page chimes and says it (*"Time to call mom."*), again every minute (twice more) until you say something or press stop; kept in `.timers.json`, so they survive a restart, and one that went off while the server was down is announced late rather than lost | – |
+| `lists` | "Add milk and eggs to my shopping list", "what's on my to-do list?", "I bought the eggs", "clear my shopping list": shopping, to-do or any list you name, kept in `.lists.json` on the server | – |
+| `memory` | "Remember that I parked on level 3", "forget where I parked": facts kept in `.memory.json` (up to 40) and given to the model in every conversation, so "where did I park?" works days later | – |
 | `home_assistant` | "Turn off the kitchen lights", "is the car locked?": passed to Home Assistant's own Assist intent handling, so device names, aliases and areas work as in HA, and **only entities exposed to voice assistants in HA** can be touched | `.ha_token` (a long-lived access token: HA → your profile → Security), `.ha_url` or `MING_HA_URL` (default `http://homeassistant.local:8123`) |
 | `jellyfin` | "Play The Office on the TV", "pause", "what's playing?", "do I have Dune?": searches your library and remote-controls open Jellyfin players (a series continues from the next unwatched episode) | `.jellyfin.json`: `{"url": "http://<host>:8096", "key": "<API key>"}` (Jellyfin → Dashboard → API Keys) |
 | `ask_hermes` | "Ask Hermes to ...": hands a job (research, your files and accounts, reminders, multi-step work) to a [Hermes Agent](https://github.com/NousResearch/hermes-agent) in the background; the answer is announced when it's ready, even if you've moved on. Only when you say "Hermes" (checked against what you said); `MING_HERMES_AUTO=1` lets Ming hand it anything its own tools can't do | `.hermes.json`: `{"url": "http://<host>:8642", "key": "<API_SERVER_KEY>"}` (Hermes: `API_SERVER_ENABLED=true`, `API_SERVER_KEY`, `API_SERVER_HOST` in `~/.hermes/.env`) |
 
-Tools that change something (timers, Home Assistant, Jellyfin, Hermes) never run for a speculative reply: they wait until your
+Tools that change something (timers, lists, memory, Home Assistant, Jellyfin, Hermes) never run for a speculative reply: they wait until your
 turn has really ended, so a pause mid-sentence can't switch a light. Files are read at server start.
 Jellyfin only starts playback when you said to (play, watch, put on, listen, ...), and is only used when you talk
 about watching or listening to something. An answer from search or weather results ends after a few sentences,
@@ -156,7 +159,8 @@ rather than reading out a whole list of search results; any other answer ends af
 unless you asked for something long (a story, a recipe, steps, "in detail", ...). Each reply privately starts
 from the local date and time, so "what time is it?" needs no tool. And if a reply starts by claiming it can't
 look things up ("I don't have access to real-time data..."), it's caught before it's spoken and becomes a web
-search (or weather lookup) instead.
+search (or weather lookup) instead. Likewise, a reply that says it changed a list or forgot something without
+calling the tool ("The eggs are off your list") gets that call made for it, so what it said is true.
 
 **Risky actions are confirmed first.** Unlocking, opening a garage door or gate, and disarming or turning off an
 alarm get a question back (*"Just to be sure: do you want me to unlock the front door?"*) and only happen when

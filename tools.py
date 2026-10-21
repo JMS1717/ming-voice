@@ -584,6 +584,125 @@ def _hermes(method: str, path: str, body: dict | None = None, timeout: float = 1
         return json.load(r)
 
 
+# --------------------------------------------------------------------------- lists and memory
+
+LISTS_FILE = Path(__file__).resolve().parent / ".lists.json"
+MEMORY_FILE = Path(__file__).resolve().parent / ".memory.json"
+MAX_MEMORY = 40  # facts (they're in the system prompt)
+
+
+def _read_json(path: Path, default):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def _write_json(path: Path, data):
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False))
+    tmp.replace(path)
+
+
+def _spoken_list(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _list_name(name: str) -> str:
+    n = re.sub(r"\b(my|the|our|list|lists)\b", " ", str(name or "").lower())
+    n = " ".join(n.replace("_", " ").split()).strip(" -")
+    if re.fullmatch(r"to ?-? ?dos?|tasks?|chores?", n):
+        return "to-do"
+    if n in ("", "grocery", "groceries", "shopping", "food", "store"):
+        return "shopping"
+    return n
+
+
+def _items(items) -> list[str]:
+    if isinstance(items, str):  # (one string: "milk, eggs")
+        items = re.split(r",|;|\n", items)
+    out = []
+    for i in items or []:
+        i = " ".join(str(i).split()).strip(" .")
+        if i and i.lower() not in (x.lower() for x in out):
+            out.append(i)
+    return out
+
+
+def _same_item(a: str, b: str) -> bool:
+    norm = lambda s: " ".join(re.sub(r"(?<=\w)(es|s)\b", "", w) for w in re.findall(r"[a-z0-9]+", s.lower())
+                              if w not in ("a", "an", "the", "some"))
+    a, b = norm(a), norm(b)
+    return bool(a and b) and (a == b or f" {a} " in f" {b} " or f" {b} " in f" {a} ")
+
+
+def lists_tool(action: str = "read", list: str = "shopping", items=None) -> tuple[str, dict]:
+    """The user's own lists (.lists.json): shopping, to-do, or any other name."""
+    lists, name, items = _read_json(LISTS_FILE, {}), _list_name(list), _items(items)
+    have = lists.get(name, [])
+    title = f"{name} list"
+    if action == "add":
+        if not items:
+            return "Error: say what to add.", {}
+        new = [i for i in items if not any(_same_item(i, h) for h in have)]
+        lists[name] = have + new
+        _write_json(LISTS_FILE, lists)
+        dup = [i for i in items if i not in new]
+        say = (f"Added {_spoken_list(new)} to your {title}." if new else "") + \
+              (f" {_spoken_list(dup).capitalize()} {'was' if len(dup) == 1 else 'were'} already on it." if dup else "")
+        return say.strip(), {"say": say.strip(), "list": name}
+    if action == "remove":
+        gone = [h for h in have if any(_same_item(i, h) for i in items)]
+        missing = [i for i in items if not any(_same_item(i, h) for h in gone)]
+        lists[name] = [h for h in have if h not in gone]
+        _write_json(LISTS_FILE, lists)
+        say = (f"Removed {_spoken_list(gone)} from your {title}." if gone else "") + \
+              (f" {_spoken_list(missing).capitalize()} {'isn' if len(missing) == 1 else 'aren'}'t on it." if missing else "")
+        return say.strip() or "Error: say what to remove.", {"say": say.strip(), "list": name}
+    if action == "clear":
+        lists[name] = []
+        _write_json(LISTS_FILE, lists)
+        say = f"Your {title} is cleared." if have else f"Your {title} was already empty."
+        return say, {"say": say, "list": name}
+    if action in ("names", "lists"):
+        # (reads go back to the model, not straight to the user: it often reads a list before changing it)
+        names = [f"a {n} list with {len(v)} {'item' if len(v) == 1 else 'items'}" for n, v in lists.items() if v]
+        return f"The user has {_spoken_list(names)}." if names else "All the user's lists are empty.", {}
+    if action == "read":
+        return (f"The user's {title} is empty." if not have else
+                f"The user's {title} ({len(have)} items): " + "; ".join(have) + "."), {"list": name}
+    return f"Error: unknown action {action!r}.", {}
+
+
+def memories() -> list[str]:
+    return _read_json(MEMORY_FILE, [])
+
+
+def memory_tool(action: str = "remember", fact: str = "") -> tuple[str, dict]:
+    """Facts the user asked to be remembered across conversations (.memory.json); they go into the system prompt."""
+    fact = " ".join(str(fact or "").split()).strip()
+    facts = memories()
+    if not fact:
+        return "Error: say what to remember or forget.", {}
+    if action == "remember":
+        facts = [f for f in facts if f.lower() != fact.lower()] + [fact]
+        _write_json(MEMORY_FILE, facts[-MAX_MEMORY:])
+        return "Okay, I'll remember that.", {"say": "Okay, I'll remember that."}
+    if action == "forget":
+        stop = {"the", "a", "an", "my", "user", "s", "is", "that", "to", "of", "i", "me", "where", "what", "when"}
+        # (crudely stemmed: "parking" and "parked" both match "park")
+        words = lambda s: {re.sub(r"(ing|ed|es|s)$", "", w) if len(w) > 4 else w
+                           for w in re.findall(r"[a-z0-9]+", s.lower()) if w not in stop}
+        want = words(fact)
+        scored = sorted(((len(want & words(f)) / max(1, len(want)), f) for f in facts), reverse=True)
+        if not scored or scored[0][0] < 0.5:
+            return "There's nothing like that to forget.", {"say": "I don't have anything like that remembered."}
+        gone = scored[0][1]
+        _write_json(MEMORY_FILE, [f for f in facts if f != gone])
+        return f"Forgot: {gone}", {"say": "Okay, I've forgotten that."}
+    return f"Error: unknown action {action!r}.", {}
+
+
 # --------------------------------------------------------------------------- registry
 
 def _fn(name, description, params, required):
@@ -612,6 +731,24 @@ SPECS = [
          "message": {"type": "string", "description": "for set: what to remind the user of (empty for a plain timer); "
                                                       "for cancel: which one ('the pasta timer', 'all')"}},
         ["action"]),
+    _fn("lists", "Add items to, remove items from, read or clear the user's lists: shopping list, to-do list, or "
+        "any list they name. Lists change between conversations, so call this every time the user asks what's on "
+        "one.",
+        {"action": {"type": "string", "enum": ["add", "remove", "read", "clear", "names"],
+                    "description": "add: put the items on the list; remove: take them off (also when the user says "
+                                   "they bought or did them); read: say what's on the list; clear: empty it; names: "
+                                   "which lists exist"},
+         "list": {"type": "string", "description": "which list, e.g. 'shopping' (the default) or 'to-do'"},
+         "items": {"type": "string",
+                   "description": "for add and remove: the items, separated by commas, e.g. 'milk, eggs, bread'"}},
+        ["action"]),
+    _fn("memory", "Remember something the user tells you to remember for later conversations ('remember that my "
+        "sister's birthday is May 3rd', 'I parked on level 3'), or forget something when they say 'forget ...' "
+        "(nothing is forgotten unless you call this). What you remember is listed in your instructions: answer "
+        "questions from there.",
+        {"action": {"type": "string", "enum": ["remember", "forget"]},
+         "fact": {"type": "string", "description": "one short sentence, e.g. 'The user's sister's birthday is May 3.'"}},
+        ["action", "fact"]),
 ]
 HA_SPEC = _fn("home_assistant", "Control or ask about devices in the user's home through Home Assistant: lights, "
               "switches, plugs, speakers and TV, thermostat, locks, the car, scenes and scripts (not computers or "
@@ -667,9 +804,10 @@ HERMES_NAME_RE = re.compile(r"\b(h[eu]rm[eèéi]|erm[eè]s)", re.I)  # (and how 
 def hermes_auto() -> bool:
     return os.environ.get("MING_HERMES_AUTO", "0") == "1"
 _IMPL = {"web_search": web_search, "get_weather": get_weather, "calculate": calculate,
-         "get_current_time": get_current_time, "home_assistant": home_assistant, "jellyfin": jellyfin}
+         "get_current_time": get_current_time, "home_assistant": home_assistant, "jellyfin": jellyfin,
+         "lists": lists_tool, "memory": memory_tool}
 # Tools that change something: never run for a speculative reply (only once the user's turn has really ended)
-SIDE_EFFECTS = {"home_assistant", "ask_hermes", "jellyfin", "timer"}
+SIDE_EFFECTS = {"home_assistant", "ask_hermes", "jellyfin", "timer", "lists", "memory"}
 # What the assistant says while a slow tool runs (when it said nothing itself before calling it)
 FILLERS = {"web_search": "Let me look that up.", "get_weather": "Let me check the weather."}
 MAX_RESULT_CHARS = 1600  # ~400 tokens: results stay in the context for the rest of the chat
@@ -702,7 +840,7 @@ class Toolbox:
 
     def signature(self) -> str:
         """What the system prompt depends on (a change means rebuilding the context)."""
-        return json.dumps([self.specs, self.home], sort_keys=True)
+        return json.dumps([self.specs, self.home, memories()], sort_keys=True)
 
     @property
     def names(self):
@@ -726,7 +864,7 @@ class Toolbox:
             text, info = f"Error: {name} failed ({type(e).__name__}: {e}).", {"error": str(e)}
         if len(text) > MAX_RESULT_CHARS:
             text = text[:MAX_RESULT_CHARS].rsplit("\n", 1)[0]
-        if not (info or {}).get("say"):  # (said right before it answers, this works better than in the system prompt)
+        if not (info or {}).get("say") and name != "lists":  # (said right before it answers, this works better than in the system prompt)
             text += "\n(Answer from this in one or two short spoken sentences: no lists, no URLs, no follow-up offers.)"
         info = dict(info or {}, elapsed_ms=round((time.perf_counter() - t0) * 1000))
         return text, info
@@ -877,13 +1015,21 @@ def tool_guidance(home: str = "") -> str:
             "(geography, science, history, well-known facts), advice, explanations, stories, jokes and conversation "
             "yourself, without tools and without mentioning them (when asked for a joke, just tell one). Call a tool "
             "only when the answer depends on live or "
-            "recent information (news, weather, prices, scores, recent events), on the time in another place, or on exact "
-            "arithmetic, or when the user asks you to do something a tool does (timers and reminders, devices, "
-            "media). You can always get the weather and look things up online, so never say you can't: call the "
+            "recent information (news, weather, prices, scores, recent events, what's best or newest this year: "
+            "search when asked to research or compare current things), on the time in another place, or on exact "
+            "arithmetic, or when the user asks you to do something a tool does (timers and reminders, their lists, "
+            "remembering something, devices, media). You can always get the weather and look things up online, so never say you can't: call the "
             "tool. Your private note at the start of each reply has the user's local date and time; use get_current_time "
             "only for the time somewhere else. After a tool returns, answer "
             "from its results in one or two short spoken sentences, never reading out URLs, citation numbers or lists. "
-            "If the results don't answer the question, say so briefly.")
+            "If the results don't answer the question, say so briefly." + remembered())
+
+
+def remembered() -> str:
+    facts = memories()
+    return ("\nSaved memories (use them when relevant; only the memory tool can change them, so when the user asks "
+            "you to forget one, call memory with action forget before you answer): " +
+            " ".join(f if f.endswith((".", "!", "?")) else f + "." for f in facts)) if facts else ""
 
 
 def system_tools_block(specs) -> str:

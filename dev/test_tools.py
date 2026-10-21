@@ -121,6 +121,30 @@ for said, action, ok in (("tell me a joke", "play", False), ("play the office", 
 check(len(played) == 3, "only the asked-for Jellyfin actions ran")
 check(tb.run("rm_rf", {})[0].startswith("Error"), "unknown tool -> error text, no exception")
 check(tb.run("calculate", {"nope": 1})[0].startswith("Error"), "bad arguments -> error text, no exception")
+import tempfile  # noqa: E402  (lists and memory, in a scratch folder)
+from pathlib import Path  # noqa: E402
+_tmp = Path(tempfile.mkdtemp())
+tools.LISTS_FILE, tools.MEMORY_FILE = _tmp / "lists.json", _tmp / "memory.json"
+say = lambda *a, **k: tb.run(*a, **k)[1].get("say")
+check(say("lists", {"action": "add", "items": ["milk", "eggs"]}) == "Added milk and eggs to your shopping list.",
+      "lists: add to the shopping list (the default)")
+check(say("lists", {"action": "add", "list": "groceries", "items": "bread, Eggs"}) ==
+      "Added bread to your shopping list. Eggs was already on it.", "lists: groceries = shopping; no duplicates")
+check(say("lists", {"action": "add", "list": "my To Do list", "items": ["call the plumber"]}) ==
+      "Added call the plumber to your to-do list.", "lists: to-do list name")
+check(say("lists", {"action": "remove", "items": ["egg", "cheese"]}) ==
+      "Removed eggs from your shopping list. Cheese isn't on it.", "lists: remove (singular matches plural)")
+text = lambda *a, **k: tb.run(*a, **k)[0]
+check(text("lists", {"action": "read"}) == "The user's shopping list (2 items): milk; bread.", "lists: read")
+check(text("lists", {"action": "names"}) == "The user has a shopping list with 2 items and a to-do list with 1 item.",
+      "lists: which lists")
+check(say("lists", {"action": "clear", "list": "todo"}) == "Your to-do list is cleared.", "lists: clear")
+check(say("memory", {"action": "remember", "fact": "The user's sister's birthday is May 3."}) ==
+      "Okay, I'll remember that.", "memory: remember")
+sig = tb.signature()
+check("sister's birthday is May 3." in tools.tool_guidance(), "memory: in the system prompt")
+check(say("memory", {"action": "forget", "fact": "my sister's birthday"}) == "Okay, I've forgotten that." and
+      not tools.memories() and tb.signature() != sig, "memory: forget (and the prompt changes)")
 
 if "--offline" in sys.argv:
     print("ALL PASS" if not fails else f"{len(fails)} FAILED")
