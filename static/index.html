@@ -1,0 +1,753 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ming Voice</title>
+<style>
+  :root {
+    --bg: #f4f4f1; --panel: #ffffff; --panel-2: #fafaf8; --text: #1b1b19; --muted: #6d6d67; --faint: #9b9b94;
+    --line: #e4e4de; --accent: #3866d6; --accent-ink: #ffffff; --accent-soft: #e8eefc;
+    --listen: #1e9e5a; --hear: #d48a0b; --think: #3866d6; --speak: #c2410c; --off: #a3a39c; --danger: #c0392b;
+    --user: #e9eefb; --bot: #f1f1ed; --shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 16px rgba(0,0,0,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121211; --panel: #1b1b1a; --panel-2: #20201e; --text: #ececea; --muted: #a2a29b; --faint: #74746e;
+      --line: #2d2d2a; --accent: #7aa2f7; --accent-ink: #0d1424; --accent-soft: #1d2740;
+      --listen: #3fcf80; --hear: #f2b13c; --think: #7aa2f7; --speak: #f2804c; --off: #5c5c57; --danger: #ef6b5b;
+      --user: #1d2638; --bot: #242422; --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.25);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--text); font: 14.5px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  button, select, input, textarea { font: inherit; color: inherit; }
+  .app { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 18px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 16px; }
+  .brand .logo { width: 26px; height: 26px; border-radius: 8px; background: linear-gradient(135deg, var(--accent), var(--speak)); }
+  .brand small { color: var(--muted); font-weight: 400; font-size: 12.5px; }
+  .spacer { flex: 1; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-2); white-space: nowrap; }
+  .pill .d { width: 8px; height: 8px; border-radius: 50%; background: var(--off); }
+  .pill.ok .d { background: var(--listen); } .pill.bad .d { background: var(--danger); }
+  .btn { border: 1px solid var(--line); background: var(--panel); padding: 7px 12px; border-radius: 9px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .btn:hover { background: var(--panel-2); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .btn.primary:hover { filter: brightness(1.05); }
+  .btn.danger { color: var(--danger); }
+  .btn.on { background: var(--accent-soft); border-color: var(--accent); }
+  .btn.icon { padding: 7px 9px; }
+  .main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; min-height: 0; }
+  .stage { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; }
+  .hero { display: flex; flex-direction: column; align-items: center; padding: 18px 16px 8px; gap: 10px; }
+  #orb { width: 190px; height: 190px; }
+  .state-label { font-size: 15px; font-weight: 600; letter-spacing: .2px; }
+  .state-sub { color: var(--muted); font-size: 12.5px; min-height: 18px; text-align: center; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  #ptt { display: none; user-select: none; touch-action: none; }
+  .mode-ptt #ptt { display: inline-flex; }
+  #ptt.held { background: var(--hear); border-color: var(--hear); color: #fff; }
+  .stats { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  .stat { font-size: 12px; color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 3px 9px; font-variant-numeric: tabular-nums; }
+  .stat b { color: var(--text); font-weight: 600; }
+  .log-wrap { min-height: 0; overflow-y: auto; padding: 6px 18px 12px; }
+  #log { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 10px; }
+  .empty { color: var(--muted); text-align: center; padding: 30px 12px; line-height: 1.7; }
+  .empty kbd, .hint kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; background: var(--panel); }
+  .msg { max-width: 85%; padding: 9px 13px; border-radius: 14px; white-space: pre-wrap; word-wrap: break-word; box-shadow: var(--shadow); }
+  .msg.user { align-self: flex-end; background: var(--user); border-bottom-right-radius: 4px; }
+  .msg.bot { align-self: flex-start; background: var(--bot); border-bottom-left-radius: 4px; }
+  .msg .meta { display: flex; gap: 8px; align-items: center; color: var(--faint); font-size: 11.5px; margin-top: 5px; flex-wrap: wrap; }
+  .msg .meta button { border: none; background: none; color: var(--muted); cursor: pointer; padding: 0 2px; font-size: 12px; }
+  .msg .meta button:hover { color: var(--accent); }
+  .msg.user.pending .txt { color: var(--muted); font-style: italic; }
+  .msg.typing .txt::after { content: "▍"; animation: blink 1s steps(2) infinite; color: var(--muted); }
+  @keyframes blink { 50% { opacity: 0; } }
+  .composer { border-top: 1px solid var(--line); background: var(--panel); padding: 10px 18px; }
+  .composer form { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; }
+  .composer input { flex: 1; min-width: 0; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); }
+  .composer input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+  aside { border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; padding: 6px 16px 24px; }
+  aside h3 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .7px; color: var(--muted); margin: 18px 0 10px; font-weight: 650; }
+  .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+  .field > span { font-size: 12.5px; color: var(--muted); display: flex; justify-content: space-between; }
+  .field > span b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
+  select, textarea, aside input[type=text] { width: 100%; padding: 7px 9px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); }
+  textarea { min-height: 110px; resize: vertical; font-size: 13px; line-height: 1.45; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > select { flex: 1; min-width: 0; }
+  .check { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 6px 0; cursor: pointer; }
+  .check input { accent-color: var(--accent); width: 15px; height: 15px; }
+  .seg { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+  .seg button { border: none; background: var(--panel-2); padding: 7px; cursor: pointer; font-size: 13px; }
+  .seg button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .meter { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 2px; }
+  .meter > i { display: block; height: 100%; width: 0; background: var(--listen); transition: width 70ms linear; }
+  details.clone { margin: 0 0 12px; }
+  details.clone summary { cursor: pointer; font-size: 13px; color: var(--accent); margin-bottom: 8px; }
+  .hint { color: var(--faint); font-size: 12px; line-height: 1.6; margin-top: 16px; }
+  .note { font-size: 12px; color: var(--muted); background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 6px 0 12px; }
+  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 9px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 10; }
+  .toast.show { opacity: .95; }
+  #settingsToggle { display: none; }
+  .banner { display: flex; gap: 12px; align-items: center; justify-content: center; padding: 10px 16px;
+    background: var(--accent-soft); border-bottom: 1px solid var(--line); font-size: 14px; }
+  .banner[hidden] { display: none; }
+  .app { grid-template-rows: auto auto 1fr; }
+  @media (max-width: 900px) {
+    .main { grid-template-columns: 1fr; }
+    aside { display: none; border-left: none; border-top: 1px solid var(--line); }
+    .main.show-settings aside { display: block; position: fixed; inset: 52px 0 0 0; z-index: 5; }
+    #settingsToggle { display: inline-flex; }
+    header .pill.hide-sm { display: none; }
+    #orb { width: 150px; height: 150px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand"><div class="logo"></div>Ming Voice <small>Ming-3.0-audio-tiny · local</small></div>
+    <span class="spacer"></span>
+    <span id="conn" class="pill"><span class="d"></span><span>connecting…</span></span>
+    <span id="health" class="pill hide-sm" title="Conversation context and GPU memory">–</span>
+    <button class="btn" id="newChat" title="Forget the conversation (N)">New chat</button>
+    <button class="btn" id="export" title="Download the transcript">Export</button>
+    <button class="btn" id="settingsToggle">Settings</button>
+  </header>
+
+  <div class="banner" id="takeover" hidden>This conversation was opened in another tab or window.
+    <button class="btn primary" id="useHere">Use it here</button></div>
+  <div class="main" id="main">
+    <section class="stage">
+      <div class="hero">
+        <canvas id="orb" width="380" height="380" aria-hidden="true"></canvas>
+        <div class="state-label" id="stateLabel">Not started</div>
+        <div class="state-sub" id="stateSub">Pick your microphone and speakers on the right, then press Start.</div>
+        <div class="controls">
+          <button class="btn primary" id="start">Start conversation</button>
+          <button class="btn" id="mute" disabled title="Mute microphone (M)">Mute mic</button>
+          <button class="btn" id="ptt" title="Hold to talk (Space)">Hold to talk</button>
+          <button class="btn danger" id="stopReply" disabled title="Stop the current reply (Esc)">Stop reply</button>
+        </div>
+        <div class="stats">
+          <span class="stat" title="From the moment you stop talking until the reply starts playing">Response <b id="sLast">–</b></span>
+          <span class="stat" title="Median of the last 10 responses">Median <b id="sMed">–</b></span>
+          <span class="stat" title="Time the server needed after your turn ended (0 = reply was ready before the end-of-turn wait finished)">Server <b id="sSrv">–</b></span>
+          <span class="stat" title="Assistant speech generated in the last reply">Spoke <b id="sDur">–</b></span>
+        </div>
+      </div>
+      <div class="log-wrap" id="logWrap">
+        <div id="log">
+          <div class="empty">Talk naturally; pause briefly when you're done and the assistant answers out loud.<br>
+            Interrupt it any time by talking over it. Headphones give the best results.<br>
+            <kbd>Space</kbd> hold to talk (push-to-talk mode) · <kbd>M</kbd> mute · <kbd>Esc</kbd> stop reply · <kbd>N</kbd> new chat</div>
+        </div>
+      </div>
+      <div class="composer">
+        <form id="tform"><input id="tin" type="text" placeholder="Or type a message…" autocomplete="off"><button class="btn primary">Send</button></form>
+      </div>
+    </section>
+
+    <aside>
+      <h3>Audio devices</h3>
+      <div class="field"><span>Microphone</span>
+        <div class="row"><select id="inDev"></select><button class="btn icon" id="refreshDev" title="Refresh device list">⟳</button></div>
+        <div class="meter"><i id="inLvl"></i></div>
+      </div>
+      <div class="field"><span>Speakers / headphones</span>
+        <div class="row"><select id="outDev"></select><button class="btn" id="testOut" title="Play a short test tone">Test</button></div>
+        <div class="meter"><i id="outLvl"></i></div>
+      </div>
+      <div class="note" id="sinkNote" hidden>This browser can't pick an output device; audio plays on the system default. Chrome or Edge support output selection.</div>
+      <div class="field"><span>Output volume <b id="volv">100%</b></span><input id="vol" type="range" min="0" max="150" step="5" value="100"></div>
+      <label class="check"><input type="checkbox" id="aec" checked> Echo cancellation</label>
+      <label class="check"><input type="checkbox" id="ns" checked> Noise suppression</label>
+      <label class="check"><input type="checkbox" id="agc" checked> Automatic gain</label>
+
+      <h3>Conversation</h3>
+      <div class="field"><span>Turn-taking</span>
+        <div class="seg" id="modeSeg"><button data-mode="vad" class="on">Hands-free</button><button data-mode="ptt">Push-to-talk</button></div>
+      </div>
+      <div class="field"><span>Voice</span>
+        <div class="row"><select id="voice"></select><button class="btn" id="previewVoice" title="Hear this voice">&#9654;</button></div>
+      </div>
+      <details class="clone" id="cloneBox">
+        <summary>Clone a voice&hellip;</summary>
+        <div class="note">Record or upload 5&ndash;15 seconds of one person speaking clearly. Try reading:
+          <i>&ldquo;The quick brown fox jumps over the lazy dog. On quiet Sunday afternoons I like to read, cook, and listen to music.&rdquo;</i></div>
+        <div class="field"><span>Name</span><input type="text" id="cloneName" placeholder="e.g. My voice" maxlength="40"></div>
+        <div class="row" style="flex-wrap:wrap">
+          <button class="btn" id="cloneRec">&#9679; Record</button>
+          <label class="btn" style="cursor:pointer">Upload file<input type="file" id="cloneFile" accept="audio/*" hidden></label>
+          <button class="btn danger" id="cloneDel" title="Delete the selected custom voice">Delete voice</button>
+        </div>
+        <div class="state-sub" id="cloneStatus" style="text-align:left;margin-top:6px"></div>
+      </details>
+      <label class="check"><input type="checkbox" id="barge" checked> Interrupt the assistant by talking (barge-in)</label>
+
+      <h3>Timing</h3>
+      <div class="field"><span>End-of-turn pause <b id="endv">500 ms</b></span><input id="end" type="range" min="200" max="1500" step="50" value="500"></div>
+      <div class="field"><span>Extra pause after short phrases <b id="shortv">250 ms</b></span><input id="short" type="range" min="0" max="600" step="50" value="250"></div>
+      <div class="field"><span>Start thinking after <b id="specv">160 ms</b></span><input id="spec" type="range" min="0" max="400" step="20" value="160"></div>
+      <div class="field"><span>Voice detection sensitivity <b id="thv">0.50</b></span><input id="th" type="range" min="0.2" max="0.9" step="0.05" value="0.5"></div>
+      <div class="field"><span>Playback buffer <b id="bufv">100 ms</b></span><input id="buf" type="range" min="0" max="500" step="20" value="100"></div>
+
+      <h3>Persona</h3>
+      <div class="field"><span>Preset</span>
+        <select id="preset">
+          <option value="assistant">Friendly assistant</option>
+          <option value="concise">Concise expert</option>
+          <option value="tutor">Language tutor</option>
+          <option value="story">Storyteller</option>
+          <option value="custom">Custom</option>
+        </select>
+      </div>
+      <div class="field"><span>System prompt</span><textarea id="sys"></textarea></div>
+      <button class="btn" id="applySys">Apply &amp; start new chat</button>
+      <div class="hint">Shortcuts: <kbd>Space</kbd> hold to talk · <kbd>M</kbd> mute · <kbd>Esc</kbd> stop reply · <kbd>N</kbd> new chat.<br>
+        The end-of-turn pause is how long you must be quiet before the assistant replies; it starts thinking earlier (“start thinking after”) and throws that work away if you keep talking.</div>
+    </aside>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('mingvoice.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('mingvoice.' + k, JSON.stringify(v)); } catch {} },
+};
+const PRESETS = {
+  assistant: "You are a friendly, helpful voice assistant in a live spoken conversation. Listen to the user's speech and reply naturally in the same language they speak. Keep replies short and conversational, usually one to three sentences, unless the user asks for more detail. Use plain spoken language only: no markdown, bullet points, emojis, or code.",
+  concise: "You are a precise expert voice assistant. Answer the user's spoken question directly in one or two short sentences, with no filler or preamble. Use plain spoken language only: no markdown, lists, or code.",
+  tutor: "You are a patient language tutor in a spoken conversation. Reply in the language the user is practicing, keep sentences simple, gently correct mistakes by repeating the corrected sentence, then ask a short follow-up question. Use plain spoken language only.",
+  story: "You are a warm, expressive storyteller in a spoken conversation. Tell vivid but short stories and stop at natural pauses so the listener can react. Use plain spoken language only: no markdown or lists.",
+};
+
+// ---------------------------------------------------------------- state
+let ws = null, ctx = null, micStream = null, micSrc = null, capNode = null, outGain = null, outAnalyser = null;
+let audioEl = null, msDest = null;
+let running = false, muted = false, mode = store.get('mode', 'vad'), pttHeld = false;
+let sampleRate = 44100, nextTime = 0, sources = [], state = 'off';
+let inLevel = 0, outLevel = 0, tUserEnd = null, firstSound = false, latencies = [];
+let botMsg = null, botText = '', botPcm = [];
+let capRing = [], capRingLen = 0, speechStartIdx = null;  // recent mic audio for replaying user turns
+let transcript = [];
+let takenOver = false;
+const userMsgs = new Map();  // reply id -> {el, entry} for filling in transcripts
+
+function toast(t) { const e = $('toast'); e.textContent = t; e.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => e.classList.remove('show'), 2200); }
+
+const STATES = {
+  off: ['Not started', 'Pick your microphone and speakers on the right, then press Start.'],
+  idle: ['Paused', 'Microphone is off.'],
+  listening: ['Listening', 'Go ahead, I’m listening.'],
+  ptt: ['Ready', 'Hold Space or the button while you talk.'],
+  hearing: ['Hearing you', 'Pause when you’re done.'],
+  thinking: ['Thinking', ''],
+  speaking: ['Speaking', 'Talk over me to interrupt.'],
+  muted: ['Muted', 'Press M or Unmute to talk again.'],
+};
+function setState(s) {
+  state = s;
+  const [a, b] = STATES[s] || [s, ''];
+  $('stateLabel').textContent = a;
+  $('stateSub').textContent = s === 'speaking' && !$('barge').checked ? 'Barge-in is off.' : b;
+}
+function restState() { if (!running) return setState(ctx ? 'idle' : 'off'); if (muted) return setState('muted'); setState(mode === 'ptt' ? 'ptt' : 'listening'); }
+
+// ---------------------------------------------------------------- settings
+const SL = {
+  end: (v) => `${v} ms`, short: (v) => `${v} ms`, spec: (v) => (+v ? `${v} ms` : 'off'), th: (v) => (+v).toFixed(2), buf: (v) => `${v} ms`, vol: (v) => `${v}%`,
+};
+for (const id of Object.keys(SL)) {
+  $(id).value = store.get(id, $(id).value);
+  const upd = () => { $(id + 'v').textContent = SL[id]($(id).value); store.set(id, $(id).value); if (id === 'vol') applyVol(); else sendCfg(); };
+  $(id).addEventListener('input', upd); upd();
+}
+for (const id of ['barge', 'aec', 'ns', 'agc']) {
+  $(id).checked = store.get(id, $(id).checked);
+  $(id).addEventListener('change', () => { store.set(id, $(id).checked); if (id === 'barge') sendCfg(); else if (running) restartMic(); });
+}
+$('voice').addEventListener('change', () => { store.set('voice', $('voice').value); sendCfg(); });
+function applyVol() { if (outGain) outGain.gain.value = $('vol').value / 100; }
+function setMode(m) {
+  mode = m; store.set('mode', m);
+  for (const b of $('modeSeg').children) b.classList.toggle('on', b.dataset.mode === m);
+  document.body.classList.toggle('mode-ptt', m === 'ptt');
+  sendCfg(); if (state !== 'speaking' && state !== 'thinking') restState();
+}
+$('modeSeg').addEventListener('click', (e) => { if (e.target.dataset.mode) setMode(e.target.dataset.mode); });
+function sendCfg() {
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({ type: 'config', voice: $('voice').value, barge_in: $('barge').checked, mode,
+    end_ms: +$('end').value, short_extra_ms: +$('short').value, spec_ms: +$('spec').value, threshold: +$('th').value }));
+}
+$('preset').value = store.get('preset', 'assistant');
+$('sys').value = store.get('sys', PRESETS[$('preset').value] || PRESETS.assistant);
+$('preset').addEventListener('change', () => { const p = $('preset').value; store.set('preset', p); if (PRESETS[p]) { $('sys').value = PRESETS[p]; store.set('sys', $('sys').value); } });
+$('sys').addEventListener('input', () => { store.set('sys', $('sys').value); $('preset').value = 'custom'; store.set('preset', 'custom'); });
+$('applySys').onclick = () => newChat(true);
+
+// ---------------------------------------------------------------- voices & cloning
+let builtinVoices = [];
+function fillVoices(builtin, custom, select) {
+  builtinVoices = builtin;
+  const v = $('voice');
+  const esc = (x) => x.replace(/[&<>"]/g, '');
+  v.innerHTML = '<optgroup label="Built-in">' + builtin.map((x) => `<option>${esc(x)}</option>`).join('') + '</optgroup>' +
+    (custom.length ? '<optgroup label="Your voices">' + custom.map((x) => `<option>${esc(x)}</option>`).join('') + '</optgroup>' : '');
+  const want = select || store.get('voice', builtin[0]);
+  v.value = [...builtin, ...custom].includes(want) ? want : builtin[0];
+  store.set('voice', v.value);
+  $('cloneDel').disabled = builtin.includes(v.value);
+}
+$('voice').addEventListener('change', () => { $('cloneDel').disabled = builtinVoices.includes($('voice').value); });
+function outputSinkFor(a) {
+  if (!a.setSinkId) return;
+  if (ctx && typeof ctx.sinkId === 'string' && ctx.sinkId) a.setSinkId(ctx.sinkId).catch(() => {});
+  else if (audioEl && audioEl.sinkId) a.setSinkId(audioEl.sinkId).catch(() => {});
+}
+$('previewVoice').onclick = async () => {
+  const b = $('previewVoice'); b.disabled = true; b.textContent = '…';
+  try {
+    const r = await fetch(`/api/tts?voice=${encodeURIComponent($('voice').value)}&text=${encodeURIComponent('Hi! This is how I sound. Nice to meet you.')}`);
+    if (!r.ok) throw new Error(await r.text());
+    const a = new Audio(URL.createObjectURL(await r.blob()));
+    outputSinkFor(a);
+    a.volume = Math.min(1, $('vol').value / 100); a.play();
+  } catch (e) { toast('Preview failed: ' + e.message); }
+  b.disabled = false; b.textContent = '▶';
+};
+let cloneRec = null;
+async function uploadVoice(blob, label) {
+  const name = $('cloneName').value.trim();
+  if (!name) { toast('Give the voice a name first'); $('cloneName').focus(); return; }
+  $('cloneStatus').textContent = `Creating "${name}" from ${label}…`;
+  try {
+    const r = await fetch('/api/voices?name=' + encodeURIComponent(name), { method: 'POST', body: blob });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    fillVoices(j.builtin, j.custom, j.name); sendCfg();
+    $('cloneStatus').textContent = `Voice "${j.name}" is ready (${j.seconds} s sample) and selected. Press ▶ to hear it.`;
+    toast(`Voice "${j.name}" created`);
+  } catch (e) { $('cloneStatus').textContent = 'Could not create the voice: ' + e.message; }
+}
+$('cloneFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) uploadVoice(f, f.name); e.target.value = ''; });
+$('cloneRec').onclick = async () => {
+  if (cloneRec) { // stop and upload
+    const r = cloneRec; cloneRec = null; clearInterval(r.timer);
+    r.stream.getTracks().forEach((t) => t.stop()); try { r.node.disconnect(); r.src.disconnect(); } catch {}
+    $('cloneRec').textContent = '● Record'; $('cloneRec').classList.remove('on');
+    const secs = r.frames.reduce((a, f) => a + f.length, 0) / 16000;
+    if (secs < 3) { $('cloneStatus').textContent = 'Too short; record at least 3 seconds.'; return; }
+    uploadVoice(wavBlob(r.frames, 16000), `a ${secs.toFixed(1)} s recording`);
+    return;
+  }
+  if (!$('cloneName').value.trim()) { toast('Give the voice a name first'); $('cloneName').focus(); return; }
+  try {
+    await ensureCtx();
+    const dev = $('inDev').value;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: dev && dev !== 'default' ? { exact: dev } : undefined,
+      channelCount: 1, echoCancellation: false, noiseSuppression: true, autoGainControl: true } });
+    const src = ctx.createMediaStreamSource(stream), node = new AudioWorkletNode(ctx, 'cap');
+    const r = { stream, src, node, frames: [], t0: performance.now() };
+    node.port.onmessage = (e) => { r.frames.push(new Int16Array(e.data.pcm)); inLevel = Math.max(inLevel, e.data.peak); };
+    src.connect(node); const z = ctx.createGain(); z.gain.value = 0; node.connect(z); z.connect(ctx.destination);
+    r.timer = setInterval(() => {
+      const t = (performance.now() - r.t0) / 1000;
+      $('cloneStatus').textContent = `Recording… ${t.toFixed(1)} s (aim for 8–15 s, then press Stop)`;
+      if (t > 30) $('cloneRec').click();
+    }, 200);
+    cloneRec = r; $('cloneRec').textContent = '■ Stop'; $('cloneRec').classList.add('on');
+  } catch (e) { toast('Microphone error: ' + e.message); }
+};
+$('cloneDel').onclick = async () => {
+  const name = $('voice').value; if (builtinVoices.includes(name)) return;
+  if (!confirm(`Delete the voice "${name}"?`)) return;
+  const r = await fetch('/api/voices/' + encodeURIComponent(name), { method: 'DELETE' });
+  const j = await r.json(); if (r.ok) { fillVoices(j.builtin, j.custom); sendCfg(); toast('Voice deleted'); } else toast(j.error || 'Delete failed');
+};
+
+// ---------------------------------------------------------------- devices
+async function refreshDevices() {
+  let devs = [];
+  try { devs = await navigator.mediaDevices.enumerateDevices(); } catch {}
+  const fill = (sel, kind, key) => {
+    const cur = store.get(key, 'default');
+    const list = devs.filter((d) => d.kind === kind);
+    sel.innerHTML = '';
+    if (!list.length) sel.innerHTML = '<option value="default">System default</option>';
+    for (const d of list) {
+      const o = document.createElement('option');
+      o.value = d.deviceId || 'default';
+      o.textContent = d.label || (kind === 'audioinput' ? 'Microphone' : 'Speaker') + (d.deviceId ? ` (${d.deviceId.slice(0, 6)})` : '');
+      sel.appendChild(o);
+    }
+    if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+  };
+  fill($('inDev'), 'audioinput', 'inDev');
+  fill($('outDev'), 'audiooutput', 'outDev');
+  const canSink = ('setSinkId' in AudioContext.prototype) || ('setSinkId' in HTMLMediaElement.prototype);
+  $('outDev').disabled = !canSink; $('sinkNote').hidden = canSink;
+}
+navigator.mediaDevices?.addEventListener?.('devicechange', refreshDevices);
+$('refreshDev').onclick = async () => { await ensurePermission(); refreshDevices(); };
+$('inDev').addEventListener('change', () => { store.set('inDev', $('inDev').value); if (running) restartMic(); });
+$('outDev').addEventListener('change', async () => { store.set('outDev', $('outDev').value); await applySink(); });
+async function ensurePermission() {
+  try { const s = await navigator.mediaDevices.getUserMedia({ audio: true }); s.getTracks().forEach((t) => t.stop()); } catch {}
+}
+
+// ---------------------------------------------------------------- audio graph
+const WORKLET = `
+class Cap extends AudioWorkletProcessor {
+  constructor() { super(); this.ratio = sampleRate / 16000; this.acc = 0; this.sum = 0; this.cnt = 0;
+    this.buf = new Int16Array(512); this.n = 0; this.peak = 0; }
+  push(v) {
+    v = Math.max(-1, Math.min(1, v)); const a = Math.abs(v); if (a > this.peak) this.peak = a;
+    this.buf[this.n++] = v * 32767;
+    if (this.n === 512) { this.port.postMessage({ pcm: this.buf.buffer, peak: this.peak }, [this.buf.buffer]); this.buf = new Int16Array(512); this.n = 0; this.peak = 0; }
+  }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0]; if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) {   // box-filter decimation to 16 kHz
+      this.sum += ch[i]; this.cnt++; this.acc += 1;
+      if (this.acc >= this.ratio) { this.acc -= this.ratio; this.push(this.sum / this.cnt); this.sum = 0; this.cnt = 0; }
+    }
+    return true;
+  }
+}
+registerProcessor('cap', Cap);`;
+
+async function ensureCtx() {
+  if (ctx) { await ctx.resume(); return; }
+  ctx = new AudioContext({ latencyHint: 'interactive' });
+  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' })));
+  outGain = ctx.createGain(); outAnalyser = ctx.createAnalyser(); outAnalyser.fftSize = 512;
+  outGain.connect(outAnalyser);
+  applyVol();
+  await applySink();
+  await ctx.resume();
+}
+async function applySink() {
+  if (!ctx) return;
+  const id = $('outDev').value || 'default';
+  const sinkId = id === 'default' ? '' : id;
+  try { outAnalyser.disconnect(); } catch {}
+  if ('setSinkId' in AudioContext.prototype) {
+    outAnalyser.connect(ctx.destination);
+    try { await ctx.setSinkId(sinkId); } catch (e) { toast('Could not switch output: ' + e.message); }
+  } else if ('setSinkId' in HTMLMediaElement.prototype) {
+    if (!msDest) { msDest = ctx.createMediaStreamDestination(); audioEl = new Audio(); audioEl.srcObject = msDest.stream; }
+    outAnalyser.connect(msDest);
+    try { await audioEl.setSinkId(sinkId); } catch (e) { toast('Could not switch output: ' + e.message); }
+    audioEl.play().catch(() => {});
+  } else {
+    outAnalyser.connect(ctx.destination);
+  }
+}
+
+async function startMic() {
+  await ensureCtx();
+  const dev = $('inDev').value;
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: {
+    deviceId: dev && dev !== 'default' ? { exact: dev } : undefined, channelCount: 1,
+    echoCancellation: $('aec').checked, noiseSuppression: $('ns').checked, autoGainControl: $('agc').checked } });
+  micSrc = ctx.createMediaStreamSource(micStream);
+  capNode = new AudioWorkletNode(ctx, 'cap');
+  capNode.port.onmessage = (e) => {
+    inLevel = Math.max(inLevel * 0.6, e.data.peak);
+    const live = !muted && (mode === 'vad' || pttHeld);
+    const frame = new Int16Array(e.data.pcm);
+    capRing.push(frame); capRingLen += frame.length;
+    while (capRingLen > 16000 * 60 && capRing.length) { capRingLen -= capRing.shift().length; if (speechStartIdx !== null) speechStartIdx--; }
+    if (live && ws && ws.readyState === 1) ws.send(e.data.pcm);
+  };
+  micSrc.connect(capNode);
+  const sink = ctx.createGain(); sink.gain.value = 0; capNode.connect(sink); sink.connect(ctx.destination);  // keep the worklet pulled
+  await refreshDevices();
+}
+function stopMic() {
+  if (micStream) micStream.getTracks().forEach((t) => t.stop());
+  try { micSrc && micSrc.disconnect(); capNode && capNode.disconnect(); } catch {}
+  micStream = micSrc = capNode = null; inLevel = 0;
+}
+async function restartMic() { stopMic(); try { await startMic(); toast('Microphone switched'); } catch (e) { toast('Microphone error: ' + e.message); } }
+
+$('testOut').onclick = async () => {
+  await ensureCtx();
+  const t0 = ctx.currentTime + 0.05;
+  [523.25, 659.25, 783.99].forEach((f, i) => {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.frequency.value = f; g.gain.setValueAtTime(0, t0 + i * 0.12);
+    g.gain.linearRampToValueAtTime(0.25, t0 + i * 0.12 + 0.02); g.gain.exponentialRampToValueAtTime(0.001, t0 + i * 0.12 + 0.35);
+    o.connect(g); g.connect(outGain); o.start(t0 + i * 0.12); o.stop(t0 + i * 0.12 + 0.4);
+  });
+};
+
+// ---------------------------------------------------------------- playback
+function stopPlayback() { for (const s of sources) { try { s.stop(); } catch {} } sources = []; nextTime = 0; }
+function playChunk(buf) {
+  if (!ctx) return;
+  const i16 = new Int16Array(buf);
+  botPcm.push(i16);
+  const f32 = new Float32Array(i16.length);
+  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+  const ab = ctx.createBuffer(1, f32.length, sampleRate);
+  ab.copyToChannel(f32, 0);
+  const src = ctx.createBufferSource(); src.buffer = ab; src.connect(outGain);
+  const now = ctx.currentTime;
+  if (nextTime < now) nextTime = now + (+$('buf').value) / 1000;
+  src.start(nextTime);
+  if (!firstSound && tUserEnd !== null) {
+    firstSound = true;
+    const ms = Math.round(performance.now() - tUserEnd + (nextTime - now) * 1000) + (mode === 'vad' ? +$('end').value : 0);
+    latencies.push(ms); latencies = latencies.slice(-10);
+    const med = [...latencies].sort((a, b) => a - b)[Math.floor(latencies.length / 2)];
+    $('sLast').textContent = fmtMs(ms); $('sMed').textContent = fmtMs(med);
+    if (botMsg) botMsg.dataset.latency = ms;
+  }
+  nextTime += ab.duration;
+  sources.push(src);
+  src.onended = () => { sources = sources.filter((s) => s !== src); if (!sources.length && state === 'speaking') restState(); };
+  if (state !== 'hearing') setState('speaking');
+  $('stopReply').disabled = false;
+}
+const fmtMs = (ms) => (ms >= 1000 ? (ms / 1000).toFixed(2) + ' s' : ms + ' ms');
+
+// ---------------------------------------------------------------- transcript
+function clearEmpty() { const e = document.querySelector('#log .empty'); if (e) e.remove(); }
+function addMsg(cls, text) {
+  clearEmpty();
+  const d = document.createElement('div'); d.className = 'msg ' + cls;
+  const t = document.createElement('div'); t.className = 'txt'; t.textContent = text; d.appendChild(t);
+  const m = document.createElement('div'); m.className = 'meta'; d.appendChild(m);
+  $('log').appendChild(d); scrollLog(); return d;
+}
+function scrollLog() { const w = $('logWrap'); if (w.scrollHeight - w.scrollTop - w.clientHeight < 160) w.scrollTop = w.scrollHeight; }
+function wavBlob(chunks, rate) {
+  const n = chunks.reduce((a, c) => a + c.length, 0), b = new ArrayBuffer(44 + n * 2), v = new DataView(b);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
+  let o = 44; for (const c of chunks) for (let i = 0; i < c.length; i++, o += 2) v.setInt16(o, c[i], true);
+  return new Blob([b], { type: 'audio/wav' });
+}
+function addAudioControls(msgEl, blob, name, extra) {
+  const meta = msgEl.querySelector('.meta'); meta.innerHTML = '';
+  const url = URL.createObjectURL(blob); let a = null;
+  const play = document.createElement('button'); play.textContent = '▶ Play';
+  play.onclick = () => { if (a && !a.paused) { a.pause(); play.textContent = '▶ Play'; return; }
+    a = new Audio(url); if (audioEl && audioEl.sinkId && a.setSinkId) a.setSinkId(audioEl.sinkId).catch(() => {});
+    else if (ctx && ctx.sinkId && a.setSinkId && typeof ctx.sinkId === 'string') a.setSinkId(ctx.sinkId).catch(() => {});
+    a.onended = () => (play.textContent = '▶ Play'); a.play(); play.textContent = '❚❚ Pause'; };
+  const dl = document.createElement('button'); dl.textContent = '⤓ Save';
+  dl.onclick = () => { const l = document.createElement('a'); l.href = url; l.download = name; l.click(); };
+  meta.append(play, dl);
+  if (extra) { const s = document.createElement('span'); s.textContent = extra; meta.appendChild(s); }
+}
+
+// ---------------------------------------------------------------- websocket
+function setConn(ok, text) { $('conn').className = 'pill ' + (ok ? 'ok' : 'bad'); $('conn').lastElementChild.textContent = text; }
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { setConn(true, 'connected'); $('start').disabled = false; };
+  ws.onclose = () => {
+    if (takenOver) { setConn(false, 'open in another tab'); return; }
+    setConn(false, 'reconnecting…'); setTimeout(connect, 1500);
+  };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data !== 'string') { playChunk(ev.data); return; }
+    const m = JSON.parse(ev.data);
+    switch (m.type) {
+      case 'hello': {
+        sampleRate = m.sample_rate;
+        fillVoices(m.voices, m.custom_voices || []);
+        sendCfg(); break; }
+      case 'vad':
+        if (m.state === 'speech') { setState('hearing'); speechStartIdx = Math.max(0, capRing.length - 10); }
+        else if (m.state === 'ignored') { speechStartIdx = null; restState(); }
+        break;
+      case 'user_end': {
+        tUserEnd = performance.now(); firstSound = false;
+        stopPlayback();
+        let el;
+        if (m.seconds) {
+          el = addMsg('user', '🎙 Voice message');
+          el.classList.add('pending');
+          const frames = speechStartIdx !== null ? capRing.slice(speechStartIdx) : [];
+          if (frames.length) addAudioControls(el, wavBlob(frames, 16000), `you-${Date.now()}.wav`, `${m.seconds.toFixed(1)} s`);
+          const entry = { role: 'user', text: `(voice, ${m.seconds.toFixed(1)} s)` };
+          transcript.push(entry);
+          if (m.id) userMsgs.set(m.id, { el, entry });
+        }
+        speechStartIdx = null;
+        botText = ''; botPcm = []; botMsg = addMsg('bot typing', ''); setState('thinking'); $('stopReply').disabled = false;
+        break; }
+      case 'text':
+        botText += m.delta;
+        if (botMsg) { botMsg.querySelector('.txt').textContent = botText; scrollLog(); }
+        break;
+      case 'interrupt':
+        stopPlayback(); finishBot(true); restState(); break;
+      case 'done': {
+        const x = m.metrics || {};
+        if (x.first_audio_sent !== null && x.first_audio_sent !== undefined) $('sSrv').textContent = fmtMs(Math.max(0, x.first_audio_sent));
+        $('sDur').textContent = (x.audio_s ?? 0).toFixed(1) + ' s';
+        finishBot(m.interrupted);
+        if (!sources.length && state !== 'hearing') restState();
+        break; }
+      case 'transcript': {
+        const u = userMsgs.get(m.id);
+        if (u) { u.el.querySelector('.txt').textContent = m.text; u.el.classList.remove('pending'); u.entry.text = m.text; userMsgs.delete(m.id); }
+        break; }
+      case 'taken_over':
+        takenOver = true; if (running) $('start').click(); stopPlayback();
+        $('takeover').hidden = false;
+        break;
+      case 'reset_ok':
+        $('log').innerHTML = '<div class="empty">New conversation. Say hello!</div>'; transcript = []; break;
+      case 'error': addMsg('bot', '⚠ ' + m.message); break;
+    }
+  };
+}
+function finishBot(interrupted) {
+  if (!botMsg) return;
+  const el = botMsg; botMsg = null;
+  el.classList.remove('typing');
+  if (!botText) { el.querySelector('.txt').textContent = interrupted ? '(interrupted)' : '(no reply)'; }
+  const lat = el.dataset.latency ? `responded in ${fmtMs(+el.dataset.latency)}` : '';
+  const extra = [lat, interrupted ? 'interrupted' : ''].filter(Boolean).join(' · ');
+  if (botPcm.length) addAudioControls(el, wavBlob(botPcm, sampleRate), `assistant-${Date.now()}.wav`, extra);
+  else if (extra) el.querySelector('.meta').textContent = extra;
+  if (botText) transcript.push({ role: 'assistant', text: botText + (interrupted ? ' [interrupted]' : '') });
+  $('stopReply').disabled = true;
+}
+
+// ---------------------------------------------------------------- controls
+$('start').onclick = async () => {
+  if (running) {
+    running = false; stopMic(); stopPlayback();
+    $('start').textContent = 'Start conversation'; $('start').classList.add('primary'); $('mute').disabled = true; restState(); return;
+  }
+  try {
+    await startMic();
+    running = true; muted = false;
+    $('start').textContent = 'End conversation'; $('start').classList.remove('primary');
+    $('mute').disabled = false; $('mute').textContent = 'Mute mic'; $('mute').classList.remove('on');
+    restState();
+  } catch (e) { toast('Microphone error: ' + e.message); }
+};
+function toggleMute() {
+  if (!running) return; muted = !muted;
+  $('mute').textContent = muted ? 'Unmute mic' : 'Mute mic'; $('mute').classList.toggle('on', muted);
+  if (muted && pttHeld) pttUp();
+  restState();
+}
+$('mute').onclick = toggleMute;
+function stopReply() { stopPlayback(); if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'stop' })); finishBot(true); restState(); }
+$('stopReply').onclick = stopReply;
+function pttDown() {
+  if (mode !== 'ptt' || pttHeld || !running || muted) return;
+  pttHeld = true; $('ptt').classList.add('held'); stopPlayback();
+  ws && ws.send(JSON.stringify({ type: 'ptt', state: 'down' }));
+}
+function pttUp() {
+  if (!pttHeld) return;
+  pttHeld = false; $('ptt').classList.remove('held');
+  ws && ws.send(JSON.stringify({ type: 'ptt', state: 'up' }));
+}
+$('ptt').addEventListener('pointerdown', (e) => { e.preventDefault(); pttDown(); });
+for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) $('ptt').addEventListener(ev, pttUp);
+function newChat(applyPrompt) {
+  stopPlayback(); finishBot(true);
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'reset', system_prompt: $('sys').value }));
+  if (applyPrompt) toast('Persona applied — new conversation');
+}
+$('newChat').onclick = () => newChat(false);
+$('export').onclick = () => {
+  if (!transcript.length) return toast('Nothing to export yet');
+  const md = '# Ming Voice conversation\n\n' + transcript.map((t) => `**${t.role === 'user' ? 'You' : 'Assistant'}:** ${t.text}`).join('\n\n') + '\n';
+  const l = document.createElement('a'); l.href = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
+  l.download = `ming-voice-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.md`; l.click();
+};
+$('useHere').onclick = () => { takenOver = false; $('takeover').hidden = true; connect(); };
+$('settingsToggle').onclick = () => $('main').classList.toggle('show-settings');
+$('tform').onsubmit = async (e) => {
+  e.preventDefault(); const t = $('tin').value.trim(); if (!t || !ws || ws.readyState !== 1) return;
+  await ensureCtx(); stopPlayback();
+  ws.send(JSON.stringify({ type: 'text', text: t })); $('tin').value = '';
+  addMsg('user', t); transcript.push({ role: 'user', text: t });
+};
+document.addEventListener('keydown', (e) => {
+  const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
+  if (typing) return;
+  if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) pttDown(); }
+  else if (e.key === 'm' || e.key === 'M') toggleMute();
+  else if (e.key === 'Escape') stopReply();
+  else if (e.key === 'n' || e.key === 'N') newChat(false);
+});
+document.addEventListener('keyup', (e) => { if (e.code === 'Space') pttUp(); });
+
+// ---------------------------------------------------------------- orb + meters
+const orb = $('orb'), g2 = orb.getContext('2d');
+const outBuf = new Uint8Array(256);
+function cssVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+let phase = 0, smooth = 0;
+function draw() {
+  requestAnimationFrame(draw);
+  if (outAnalyser) {
+    outAnalyser.getByteTimeDomainData(outBuf);
+    let pk = 0; for (const v of outBuf) pk = Math.max(pk, Math.abs(v - 128) / 128);
+    outLevel = Math.max(outLevel * 0.85, pk);
+  }
+  inLevel *= 0.93;
+  $('inLvl').style.width = Math.min(100, inLevel * 160) + '%';
+  $('outLvl').style.width = Math.min(100, outLevel * 160) + '%';
+  const lvl = state === 'speaking' ? outLevel : (state === 'hearing' || state === 'listening' || state === 'ptt') ? inLevel : 0;
+  smooth += (Math.min(1, lvl * 2.2) - smooth) * 0.25;
+  phase += state === 'thinking' ? 0.08 : 0.025;
+  const col = { off: '--off', idle: '--off', muted: '--off', listening: '--listen', ptt: '--listen', hearing: '--hear', thinking: '--think', speaking: '--speak' }[state] || '--off';
+  const c = cssVar(col), W = orb.width, H = orb.height, cx = W / 2, cy = H / 2;
+  g2.clearRect(0, 0, W, H);
+  const base = W * 0.27, r = base * (1 + smooth * 0.35 + (state === 'thinking' ? 0.04 * Math.sin(phase * 3) : 0.02 * Math.sin(phase)));
+  for (let i = 3; i >= 1; i--) {
+    g2.beginPath(); g2.arc(cx, cy, r * (1 + i * 0.13 * (0.6 + smooth)), 0, Math.PI * 2);
+    g2.fillStyle = c; g2.globalAlpha = 0.07 * (4 - i) * (0.5 + smooth); g2.fill();
+  }
+  g2.globalAlpha = 1;
+  const grad = g2.createRadialGradient(cx - r * 0.3, cy - r * 0.35, r * 0.1, cx, cy, r);
+  grad.addColorStop(0, '#ffffff'); grad.addColorStop(0.25, c); grad.addColorStop(1, c);
+  g2.beginPath(); g2.arc(cx, cy, r, 0, Math.PI * 2); g2.fillStyle = grad; g2.fill();
+  if (state === 'thinking') {
+    g2.strokeStyle = c; g2.lineWidth = 5; g2.lineCap = 'round'; g2.beginPath();
+    g2.arc(cx, cy, r * 1.25, phase, phase + Math.PI * 0.6); g2.stroke();
+  }
+}
+draw();
+
+// ---------------------------------------------------------------- health
+async function pollHealth() {
+  try {
+    const h = await (await fetch('/api/health')).json();
+    $('health').textContent = h.ready ? `context ${h.ctx_tokens} tok · GPU ${h.gpu_mem_gib} GiB` : 'model loading…';
+  } catch { $('health').textContent = 'server offline'; }
+}
+setInterval(pollHealth, 4000); pollHealth();
+
+setMode(mode);
+setState('off');
+$('start').disabled = true;
+refreshDevices();
+connect();
+</script>
+</body>
+</html>

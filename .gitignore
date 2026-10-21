@@ -1,0 +1,22 @@
+# model weights, environments, downloaded wheels
+model/
+wheels/
+.venv/
+.venv-*/
+samples/
+
+# per-machine state
+voices/
+server.log
+*.log
+.fastlinear_tuning.json
+.warmup_stamp
+.inductor_cache/
+__pycache__/
+*.pyc
+
+# test outputs and scratch
+e2e/out/
+e2e/clone_test.wav
+eval/
+dev/scratch/
