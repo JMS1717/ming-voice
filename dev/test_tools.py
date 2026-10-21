@@ -2,6 +2,7 @@
 
     .venv/bin/python dev/test_tools.py            # unit checks + live checks against localhost:8000
     .venv/bin/python dev/test_tools.py --offline  # unit checks only (no server, no network)
+    .venv/bin/python dev/test_tools.py --home     # only Home Assistant / Jellyfin / Hermes (what's configured)
 
 Live checks: the model calls a tool when the question needs one (news, weather, arithmetic, time) and not for
 general knowledge or small talk, answers from the results, says something while a slow tool runs, keeps the
@@ -96,8 +97,12 @@ async def main():
         ]
         if "home_assistant" in offered:  # read-only: nothing gets switched
             cases.append(("Is the kitchen light on?", "home_assistant", ["kitchen", "off", " on"]))
+        if "jellyfin" in offered:  # read-only: a library search
+            cases.append(("Do I have The Office on Jellyfin?", "jellyfin", ["office"]))
         if "--hermes" in sys.argv:  # only the delegation check
             cases = []
+        if "--home" in sys.argv:  # only the Home Assistant / Jellyfin checks (then Hermes)
+            cases = cases[7:]
         for q, want_tool, words in cases:
             r = await ask(ws, q)
             names = [t["name"] for t in r["tools"]]

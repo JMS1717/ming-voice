@@ -99,7 +99,7 @@ server), press **Phone** in the app on the PC, and scan the QR code. The phone o
 * Add the page to your home screen to use it like an app; the screen stays on during a conversation.
 * One device talks to the assistant at a time: opening it on the phone takes over from the PC tab.
 
-### Tools: web search, weather, Home Assistant, Hermes
+### Tools: web search, weather, Home Assistant, Jellyfin, Hermes
 
 With **Web search & tools** on (Settings, default), the assistant can call tools while it answers. It says
 "Let me look that up" while a slow one runs, and the reply shows what it looked up and the sources.
@@ -110,9 +110,10 @@ With **Web search & tools** on (Settings, default), the assistant can call tools
 | `get_weather` | Current weather and 3-day forecast (Open-Meteo, no key); "Your location" in Settings is the default | – |
 | `calculate`, `get_current_time` | Exact arithmetic, the date and time | – |
 | `home_assistant` | "Turn off the kitchen lights", "is the car locked?": passed to Home Assistant's own Assist intent handling, so device names, aliases and areas work as in HA, and **only entities exposed to voice assistants in HA** can be touched | `.ha_token` (a long-lived access token: HA → your profile → Security), `.ha_url` or `MING_HA_URL` (default `http://homeassistant.local:8123`) |
+| `jellyfin` | "Play The Office on the TV", "pause", "what's playing?", "do I have Dune?": searches your library and remote-controls open Jellyfin players (a series continues from the next unwatched episode) | `.jellyfin.json`: `{"url": "http://<host>:8096", "key": "<API key>"}` (Jellyfin → Dashboard → API Keys) |
 | `ask_hermes` | Hands bigger jobs (research, your files and accounts, reminders, multi-step work) to a [Hermes Agent](https://github.com/NousResearch/hermes-agent) in the background; the answer is announced when it's ready, even if you've moved on | `.hermes.json`: `{"url": "http://<host>:8642", "key": "<API_SERVER_KEY>"}` (Hermes: `API_SERVER_ENABLED=true`, `API_SERVER_KEY`, `API_SERVER_HOST` in `~/.hermes/.env`) |
 
-Tools that change something (Home Assistant, Hermes) never run for a speculative reply: they wait until your
+Tools that change something (Home Assistant, Jellyfin, Hermes) never run for a speculative reply: they wait until your
 turn has really ended, so a pause mid-sentence can't switch a light. Files are read at server start.
 
 ### API
