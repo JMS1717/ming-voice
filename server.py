@@ -320,7 +320,7 @@ async def lifespan(_app):
     yield
 
 
-app = FastAPI(lifespan=lifespan, title="Ming Voice", version="1.4",
+app = FastAPI(lifespan=lifespan, title="Ming Voice", version="1.5",
               description="Local speech-to-speech assistant. The web app is at `/`; the OpenAI-compatible API is "
                           "under `/v1`. From other devices (LAN port) send `Authorization: Bearer <access key>`.")
 api.setup(ENGINE, GPU_TURN, VOICES)
