@@ -5,7 +5,10 @@ speech, so the assistant would interrupt itself. The server knows exactly what i
 reference (16 kHz, on the estimated playback timeline) and, for each microphone frame during playback:
   * cross-correlates the last 0.4 s of mic audio with the reference over 0-1 s of round-trip delay
     (client buffer + device + network latency, unknown in advance);
-  * learns the echo level ("ERL", mic RMS / reference RMS) from frames that clearly are echo (high correlation);
+  * locks onto the echo delay once strong matches from independent windows agree on it (speech is nearly
+    periodic, so two unrelated voices can match well at some random delay for a moment; a real echo path keeps
+    its delay), and from then on judges frames by the correlation near that delay;
+  * learns the echo level ("ERL", mic RMS / reference RMS) only from frames that match at the locked delay;
   * calls a frame echo when it correlates with the reference, or is not clearly louder than the echo predicted
     from the reference at that delay.
 Barge-in then counts only speech frames that are not echo. No assumptions about linearity: a strongly
@@ -20,12 +23,20 @@ SR = 16000
 
 class EchoGuard:
     def __init__(self, max_lag_s: float = 1.0, win_s: float = 0.4, keep_s: float = 3.0,
-                 rho_echo: float = 0.45, margin: float = 2.5, min_eff_s: float = 0.02):
+                 rho_echo: float = 0.45, margin: float = 2.5, min_eff_s: float = 0.02,
+                 rho_locked: float = 0.3, lock_rho: float = 0.55, lock_tol_s: float = 0.01):
         self.max_lag = int(max_lag_s * SR)
         self.win = int(win_s * SR)
         self.keep = int(keep_s * SR)
         self.rho_echo, self.margin = rho_echo, margin
         self.min_eff = min_eff_s * SR
+        # Echo-path lock: a real echo arrives at the same delay window after window, a chance match between two
+        # voices at a random one. Once >= 3 strong matches from non-overlapping windows agree on the delay, frames
+        # are judged by the correlation near that delay only (far fewer chances to match by luck, so a lower
+        # threshold), and only then is the echo level learned.
+        self.rho_locked, self.lock_rho, self.lock_tol = rho_locked, lock_rho, int(lock_tol_s * SR)
+        self.lock_lag = None
+        self.cands = []  # (time, lag) of strong matches
         self.ref = np.zeros(0, np.float32)
         self.ref_t0 = 0.0  # wall-clock playback time of ref[0]
         self.mic = np.zeros(self.win, np.float32)
@@ -35,6 +46,7 @@ class EchoGuard:
         self.mic_rms = 0.0
         self.ref_rms = 0.0
         self.active_until = 0.0
+        self.learned = []  # (rho, lag, mic, ref) of the frames the echo level was learned from (debugging)
 
     # -- reference: what the client is playing --
     def add_playback(self, pcm16k: np.ndarray, start_time: float):
@@ -102,21 +114,43 @@ class EchoGuard:
         valid = (seg_energy > 1e-3 * seg_energy.max() + 1e-9) & (seg_energy * seg_energy > self.min_eff * seg_e4)
         rho = np.where(valid, np.abs(c) / np.sqrt(seg_energy * mic_energy + 1e-18), 0.0)
         np.clip(rho, 0.0, 1.0, out=rho)
+        top = len(seg) - len(m)  # k = top - lag
         k = int(np.argmax(rho))
+        best_rho, best_lag = float(rho[k]), top - k
+        if best_rho >= self.lock_rho:
+            self._candidate(now, best_lag)
+        if self.lock_lag is not None:  # judge by the locked delay (tracking slow drift)
+            k0, k1 = max(0, top - self.lock_lag - self.lock_tol), min(len(rho), top - self.lock_lag + self.lock_tol + 1)
+            if k1 > k0:
+                k = k0 + int(np.argmax(rho[k0:k1]))
         self.rho = float(rho[k])
-        self.lag = len(seg) - len(m) - k  # samples between playback and arrival
+        self.lag = top - k  # samples between playback and arrival
         # reference level at that delay, for the newest frame
         tail = seg[k + len(m) - len(frame): k + len(m)]
         self.ref_rms = float(np.sqrt(np.mean(tail ** 2)) + 1e-9)
-        if self.rho > 0.6 and self.ref_rms > 3e-3:  # clearly echo: learn how loud the echo is
-            r = self.mic_rms / self.ref_rms
-            self.erl = r if self.erl is None else 0.9 * self.erl + 0.1 * r
+        if self.lock_lag is not None and self.rho >= 0.5:
+            self.lock_lag = self.lag
+            if self.ref_rms > 3e-3:  # clearly echo at the known delay: learn how loud the echo is
+                r = self.mic_rms / self.ref_rms
+                self.erl = r if self.erl is None else 0.9 * self.erl + 0.1 * r
+                self.learned.append((round(self.rho, 2), self.lag, round(self.mic_rms, 4), round(self.ref_rms, 4)))
+
+    def _candidate(self, now: float, lag: int):
+        """A strong match: lock (or move) the echo delay once matches from non-overlapping windows agree."""
+        self.cands = [(t, l) for t, l in self.cands if now - t < 4.0] + [(now, lag)]
+        if self.lock_lag is not None and abs(lag - self.lock_lag) <= self.lock_tol:
+            return
+        near = [t for t, l in self.cands if abs(l - lag) <= 3 * SR // 1000]
+        # >= 3 agreeing matches spread over two full windows (overlapping windows share most of their samples,
+        # so a chance match can repeat for a few hundred ms)
+        if len(near) >= 3 and max(near) - min(near) >= 2 * self.win / SR:
+            self.lock_lag = lag
 
     def is_echo(self, now: float) -> bool:
         """Is the newest mic frame (most likely) the assistant's own voice?"""
         if not self.active(now) or self.ref_rms <= 3e-3:
             return False
-        if self.rho >= self.rho_echo:
+        if self.rho >= (self.rho_locked if self.lock_lag is not None else self.rho_echo):
             return True
         if self.erl is not None and self.mic_rms < self.margin * self.erl * self.ref_rms:
             return True

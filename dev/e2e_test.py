@@ -158,7 +158,7 @@ async def main():
         await turn("sleep", load("sleep"))
         r = await turn("story_bargein", load("story"), interrupt_with=load("interrupt"))
         # the barge-in question's own reply follows the interrupted one
-        await turn("after_bargein", np.zeros(1600, np.float32), clear=False)
+        await turn("after_bargein", np.zeros(1600, np.float32), clear=False, settle=3.0)  # (may come after a withdrawn reply)
         for t in tasks:
             t.cancel()
 
