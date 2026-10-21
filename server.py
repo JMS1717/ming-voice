@@ -407,6 +407,7 @@ class Session:
         self.asr_cancel = threading.Event()  # set when the user starts a new turn: drop background ASR
         self.play_until = 0.0
         self.speaking_frames = 0
+        self.noise_rms = 0.0  # background level between utterances
         self.preroll: list[np.ndarray] = []
         self.reset_listen()
 
@@ -414,7 +415,8 @@ class Session:
         self.in_speech = False
         self.frames: list[np.ndarray] = []
         self.speech_frames = 0
-        self.silence_frames = 0
+        self.pause_frames = 0  # frames since the pause began (voice energy dropped, or Silero released)
+        self.speech_rms, self.n_loud = 0.0, 0  # this utterance's average speech level
         self.turn_fut = None
         self.turn_p = None
 
@@ -530,7 +532,10 @@ class Session:
                 self.speech_frames = len(self.frames)
                 self.emit_json({"type": "vad", "state": "speech"})
             return
+        rms = float(np.sqrt(np.mean(f * f)))
         if not self.in_speech:
+            if p < 0.3:
+                self.noise_rms += 0.05 * (rms - self.noise_rms)
             self.preroll.append(f)
             self.preroll = self.preroll[-10:]  # 320 ms pre-roll
             if p >= self.threshold and not echo:  # (echo: the tail of the reply still coming back)
@@ -538,26 +543,35 @@ class Session:
                 self.in_speech = True
                 self.frames = list(self.preroll)
                 self.speech_frames = 1
-                self.silence_frames = 0
+                self.pause_frames = 0
                 self.emit_json({"type": "vad", "state": "speech"})
             return
         self.frames.append(f)
-        if p >= self.threshold - 0.15:
+        if p >= self.threshold:
+            self.n_loud += 1
+            self.speech_rms += (rms - self.speech_rms) / min(self.n_loud, 50)
+        # Silero keeps saying "speech" for ~120-190 ms after the voice stops, so pauses are timed from the drop
+        # in voice energy (20 dB under this utterance's level, or near the noise floor). That only starts the
+        # speculative reply and the turn model earlier: ending the turn still needs Silero to agree.
+        quiet = self.n_loud > 0 and rms < max(0.1 * self.speech_rms, 2.5 * self.noise_rms)
+        released = p < self.threshold - 0.15
+        soft_speech = not released and self.pause_frames >= 7  # still "speech" well past Silero's hangover
+        if (not released and not quiet) or soft_speech:
             self.speech_frames += 1
-            if self.silence_frames:
+            if self.pause_frames:
                 self._abort_spec()  # user kept talking: discard the speculative reply
                 self.turn_fut = self.turn_p = None
-            self.silence_frames = 0
+            self.pause_frames = 0
             return
-        self.silence_frames += 1
-        silence_ms = self.silence_frames * FRAME / 16
+        self.pause_frames += 1
+        silence_ms = self.pause_frames * FRAME / 16
         speech_s = self.speech_frames * FRAME / 16000
         long_enough = speech_s >= 0.25
         end_ms = self._end_of_turn_ms(silence_ms, speech_s, long_enough)
         if (self.spec_ms and self.spec is None and long_enough and silence_ms >= self.spec_ms
                 and silence_ms < end_ms):
             self.spec = self.start_reply(self._utterance(), speculative=True)
-        if silence_ms >= end_ms:
+        if silence_ms >= end_ms and released:
             audio = self._utterance()
             self.reset_listen()
             self.preroll = []
@@ -601,7 +615,7 @@ class Session:
 
     def _utterance(self):
         audio = np.concatenate(self.frames)
-        keep = len(audio) - int(max(0, self.silence_frames * FRAME - 150 * 16))  # keep ~150 ms of silence
+        keep = len(audio) - int(max(0, self.pause_frames * FRAME - 150 * 16))  # keep ~150 ms of silence
         return audio[:max(keep, FRAME)]
 
     # -- reply --

@@ -6,5 +6,5 @@ cfgs=("$@")
 for cfg in "${cfgs[@]}"; do
   spec=${cfg%%:*}; smart=${cfg##*:}
   echo "== spec_ms $spec, smart turn $smart"
-  E2E_SPEC_MS=$spec E2E_SMART=$smart timeout 300 .venv/bin/python dev/e2e_test.py 2>&1 | grep -E "^PASS|^FAIL|median"
+  E2E_SPEC_MS=$spec E2E_SMART=$smart timeout 300 .venv/bin/python dev/e2e_test.py 2>&1 | grep -E "^PASS|^FAIL|^end of speech|^withdrawn|^perceived"
 done

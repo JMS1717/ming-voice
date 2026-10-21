@@ -88,7 +88,9 @@ async def main():
     story = trim(load("story"))
     ev = await converse([(story, 3.5), (trim(load("interrupt")), 0)], {})
     kinds, done, heard = summary(ev)
-    c = kinds.count("retract") == 0 and kinds.count("interrupt") >= 1
+    # (the interrupting clip itself pauses mid-sentence, so a resume may follow; the first reaction must not be one)
+    barge = [k for k in kinds if k in ("interrupt", "retract")]
+    c = bool(barge) and barge[0] == "interrupt"
     print(("PASS " if c else "FAIL ") + f"late barge-in stays an interruption ({kinds})")
     ok &= c
     print("ALL PASS" if ok else "SOME FAILED")

@@ -27,7 +27,7 @@ Everything runs locally; no audio leaves the machine.
 
 | | |
 |---|---|
-| From the end of your speech to the first audio | ~0.29 s median (end-of-turn pause ~0.26 s when Smart Turn is confident; the reply is generated during the pause) |
+| From the end of your speech to the first audio | ~0.29 s median, measured from the last audible sound of the question (the pause is timed from the drop in voice energy, ~0.25 s when Smart Turn is confident; the reply is generated during it) |
 | Thinker (audio LLM, 9.3B MoE / 2.7B active) | ~115 tokens/s decode; first token ~80 ms after a short spoken turn (~65 ms typed) |
 | Talker (speech synthesis) | ~0.3× real time end to end; 13 ms per 80 ms of audio for the core step |
 | Startup | ~30 s (first start after install: ~1–2 min to compile kernels) |

@@ -63,10 +63,12 @@ class Mic:
 
 async def main():
     results = []
+    retracts = [0]
     async with websockets.connect(f"ws://{URL}/ws", max_size=2**24) as ws:
         hello = json.loads(await ws.recv())
         await ws.send(json.dumps({"type": "config", "voice": "US_Stella", "end_ms": 500, "spec_ms": int(os.environ.get("E2E_SPEC_MS", "64")),
                                   "smart_turn": os.environ.get("E2E_SMART", "1") == "1",
+                                  **({"fast_end_ms": int(os.environ["E2E_FAST_END"])} if "E2E_FAST_END" in os.environ else {}),
                                   "barge_in": True}))
         if os.environ.get("E2E_RESET", "1") == "1":
             await ws.send(json.dumps({"type": "reset"}))
@@ -81,6 +83,7 @@ async def main():
         async def turn(name, audio, interrupt_with=None, interrupt_after=1.5, clear=True, settle=0.0):
             while clear and not events.empty():
                 events.get_nowait()
+            audio_in = audio
             mic.say(audio)
             while mic.busy:
                 await asyncio.sleep(0.01)
@@ -91,6 +94,7 @@ async def main():
             t_end = mic.t_last_speech
             pcm, text, first_audio, done, interrupted, saw_interrupt = [], "", None, None, False, False
             sent_interrupt = False
+            multi = interrupt_with is not None  # several utterances: no single end of speech to time from
             pause_ms = None
             deadline = time.perf_counter() + 90
             while time.perf_counter() < deadline:
@@ -113,6 +117,9 @@ async def main():
                     text += ev["delta"]
                 elif ev["type"] == "interrupt":
                     saw_interrupt = True
+                elif ev["type"] == "retract":  # it answered during a pause and the user carried on: drop it
+                    retracts[0] += 1
+                    pcm, text, first_audio, multi = [], "", None, True
                 elif ev["type"] == "user_end" and pause_ms is None:
                     pause_ms = ev.get("pause_ms")
                 elif ev["type"] == "done":
@@ -127,11 +134,15 @@ async def main():
             os.makedirs(os.path.join(HERE, "e2e", "out"), exist_ok=True)
             sf.write(os.path.join(HERE, "e2e", "out", f"{name}.wav"), audio, 44100)
             lat = None if first_audio is None else round((first_audio - t_end) * 1000)
+            # from the end of the actual speech (clips carry ~0.4 s of trailing silence) to the first audio
+            loud = np.flatnonzero(np.abs(audio_in) > 0.01)
+            trail = (len(audio_in) - loud[-1]) / 16000 if len(loud) else 0.0
+            speech_lat = None if first_audio is None or multi else round((first_audio - t_end + trail) * 1000)
             heard = (await asyncio.get_running_loop().run_in_executor(None, asr, audio)) if len(audio) > 4410 else ""
             fa = ((done or {}).get("metrics") or {}).get("first_audio_sent")
             # what a listener perceives: silence until the server ended the turn (VAD-measured) + time to audio
             perceived = None if pause_ms is None or fa is None else pause_ms + max(0, fa)
-            r = dict(name=name, latency_ms=lat, perceived_ms=perceived, pause_ms=pause_ms, reply_text=text.strip(), heard=heard,
+            r = dict(name=name, latency_ms=lat, speech_end_ms=speech_lat, perceived_ms=perceived, pause_ms=pause_ms, reply_text=text.strip(), heard=heard,
                      audio_s=round(len(audio) / 44100, 2), metrics=(done or {}).get("metrics"),
                      interrupted=bool(done and done.get("interrupted")), saw_interrupt=saw_interrupt)
             results.append(r)
@@ -156,6 +167,9 @@ async def main():
     print("clip end -> first audio byte (ms):", lats, " median", int(np.median(lats)) if lats else None)
     per = [r["perceived_ms"] for r in results if r["perceived_ms"] is not None and r["name"] != "after_bargein"]
     print("perceived: silence after speech -> first audio (ms):", per, " median", int(np.median(per)) if per else None)
+    sl = [r["speech_end_ms"] for r in results if r["speech_end_ms"] is not None and r["name"] != "after_bargein"]
+    print("end of speech -> first audio byte (ms):", sl, " median", int(np.median(sl)) if sl else None)
+    print("withdrawn replies (resume after a pause):", retracts[0])
     checks = {
         "every turn produced audio": all(r["audio_s"] > 0.3 for r in results[:5]),
         "capital answer mentions Paris": "paris" in (results[0]["reply_text"] + results[0]["heard"]).lower(),
