@@ -47,16 +47,18 @@ Brave Search, and Open-Meteo); turn tools off in Settings to stay fully offline.
 - **OpenAI-compatible API** for text-to-speech, transcription, and chat with audio in and out
 - English and Chinese
 
+<div align="center">
 <table>
 <tr>
-<td width="50%" align="center" valign="top"><img src="docs/screenshots/phone.png" alt="Ming Voice on a phone in dark mode" width="100%"></td>
-<td width="50%" align="center" valign="top"><img src="docs/screenshots/settings.png" alt="Settings: turn-taking mode, voice, tools, timing and persona" width="66%"></td>
+<td align="center" valign="top"><img src="docs/screenshots/phone.png" alt="Ming Voice on a phone in dark mode" width="300"></td>
+<td align="center" valign="top"><img src="docs/screenshots/settings.png" alt="Settings: turn-taking mode, voice, tools, timing and persona" width="197"></td>
 </tr>
 <tr>
-<td valign="top"><b>On your phone</b>: the same app over your home Wi-Fi, installable on the home screen.</td>
-<td valign="top"><b>Tune everything</b>: hands-free, wake word or push-to-talk, the voice, how long a pause ends your turn, and the assistant's persona.</td>
+<td width="300" valign="top"><b>On your phone</b>: the same app over your home Wi-Fi, installable on the home screen.</td>
+<td width="197" valign="top"><b>Tune everything</b>: turn-taking, voice, timing and persona.</td>
 </tr>
 </table>
+</div>
 
 ## Performance
 
