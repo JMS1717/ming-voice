@@ -626,6 +626,7 @@ function connect() {
       case 'hello': {
         sampleRate = m.sample_rate;
         fillVoices(m.voices, m.custom_voices || []);
+        if ((m.history || []).length && !transcript.length) restoreHistory(m.history);
         sendCfg(); break; }
       case 'vad':
         if (m.state === 'speech') { setState('hearing'); speechStartIdx = Math.max(0, capRing.length - 10); }
@@ -673,6 +674,18 @@ function connect() {
       case 'error': addMsg('bot', '⚠ ' + m.message); break;
     }
   };
+}
+function restoreHistory(hist) {
+  for (const h of hist) {
+    const u = addMsg('user', h.user || '🎙 Voice message');
+    u.querySelector('.meta').textContent = 'earlier';
+    transcript.push({ role: 'user', text: h.user || '(voice)' });
+    if (h.assistant) {
+      const b = addMsg('bot', h.assistant);
+      b.querySelector('.meta').textContent = h.interrupted ? 'earlier · interrupted' : 'earlier';
+      transcript.push({ role: 'assistant', text: h.assistant + (h.interrupted ? ' [interrupted]' : '') });
+    }
+  }
 }
 function finishBot(interrupted) {
   if (!botMsg) return;

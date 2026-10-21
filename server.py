@@ -725,9 +725,13 @@ async def ws_endpoint(ws: WebSocket):
         except Exception:
             pass
     ACTIVE["sess"] = sess
+    th = ENGINE["thinker"]
+    # the conversation so far, so a reloaded page (or the phone after switching apps) can show it again
+    history = [{"user": h.get("user"), "assistant": h.get("content", ""), "interrupted": h.get("interrupted", False)}
+               for h in list(th.history)]
     await ws.send_text(json.dumps({"type": "hello", "voices": VOICES, "custom_voices": _all_voices()["custom"],
-                                   "sample_rate": Talker.SR,
-                                   "system_prompt": ENGINE["thinker"].system_prompt}))
+                                   "sample_rate": Talker.SR, "system_prompt": th.system_prompt,
+                                   "history": history}, ensure_ascii=False))
 
     async def sender():
         while True:
