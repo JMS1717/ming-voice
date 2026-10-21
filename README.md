@@ -49,10 +49,12 @@ Brave Search, and Open-Meteo); turn tools off in Settings to stay fully offline.
 
 <table>
 <tr>
-<td width="34%" valign="top"><img src="docs/screenshots/phone.png" alt="Ming Voice on a phone in dark mode"></td>
-<td width="66%" valign="top"><img src="docs/screenshots/settings.png" alt="Settings: turn-taking mode, voice, tools, timing and persona" width="60%"><br><br>
-<b>On your phone</b>: the same app over your home Wi-Fi, installable on the home screen.<br><br>
-<b>Tune everything</b>: hands-free, wake word or push-to-talk, the voice, how long a pause ends your turn, and the assistant's persona.</td>
+<td width="50%" align="center" valign="top"><img src="docs/screenshots/phone.png" alt="Ming Voice on a phone in dark mode" width="100%"></td>
+<td width="50%" align="center" valign="top"><img src="docs/screenshots/settings.png" alt="Settings: turn-taking mode, voice, tools, timing and persona" width="66%"></td>
+</tr>
+<tr>
+<td valign="top"><b>On your phone</b>: the same app over your home Wi-Fi, installable on the home screen.</td>
+<td valign="top"><b>Tune everything</b>: hands-free, wake word or push-to-talk, the voice, how long a pause ends your turn, and the assistant's persona.</td>
 </tr>
 </table>
 
