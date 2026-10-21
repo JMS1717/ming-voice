@@ -1,6 +1,8 @@
 """Try voice-design candidates for a persona voice. Run with the server stopped (needs the GPU):
 
     HSA_ENABLE_DXG_DETECTION=1 .venv/bin/python dev/design_voice.py OUT_DIR
+    ... OUT_DIR --takes N [--ip UK_George]   (single takes to anchor; --ip: a built-in voice as the base, for its accent)
+    ... OUT_DIR --save TAKE.pt NAME          (anchors/NAME.pt from a take)
 
 Each candidate is a built-in voice (ip) and/or a style description (the talker's voice-design control). For each,
 a few takes of some lines: transcription check, pitch, and how alike the takes sound (a designed voice is a fresh
@@ -25,6 +27,8 @@ LINES = ["Good evening, sir. The living room lights are off, and I've taken the 
          "Certainly. Your reminder is set for nine o'clock tomorrow morning."]
 EN = ("A refined, middle-aged English butler with a received pronunciation British accent: calm, crisp and "
       "articulate, warm baritone, dry understated wit, measured pace.")
+RP = ("A posh, middle-aged English butler with a strong, crisp received pronunciation British accent, as heard on "
+      "the BBC: deep, smooth and formal, unhurried, with dry understated wit.")
 ZH = "一位成熟稳重的英国男管家，标准英式口音，声音低沉温和，吐字清晰优雅，语气从容，略带冷幽默，语速适中。"
 CANDIDATES = {  # name: (ip, style)
     "A_george": ("UK_George", None),
@@ -81,11 +85,11 @@ def spk(tk, x):
 ANCHOR_LINE = "Certainly sir, I have taken care of that and everything is exactly as you like it."
 
 
-def takes(n: int, style: str, out: Path):
+def takes(n: int, style: str, out: Path, ip=None):
     """--takes N: N single-fragment takes of ANCHOR_LINE with a style (each a different speaker): wav + latents per
     take, to pick one and anchor it (--save)."""
     tk = Talker()
-    instr = tk.tp.build_structured_instruction(style=style)
+    instr = tk.tp.build_structured_instruction(ip=ip, style=style)
     prepare = tk.prepare
     tk.prepare = lambda text, voice: [(f, p, instr) for f, p, _ in prepare(text, "UK_George")]
     k = 0
@@ -130,7 +134,8 @@ def main():
     out = Path(sys.argv[1])
     out.mkdir(parents=True, exist_ok=True)
     if "--takes" in sys.argv:
-        return takes(int(sys.argv[sys.argv.index("--takes") + 1]), EN, out)
+        ip = sys.argv[sys.argv.index("--ip") + 1] if "--ip" in sys.argv else None  # e.g. UK_George: a British base
+        return takes(int(sys.argv[sys.argv.index("--takes") + 1]), RP if ip else EN, out, ip)
     if "--save" in sys.argv:
         i = sys.argv.index("--save")
         return save(Path(sys.argv[i + 1]), sys.argv[i + 2])

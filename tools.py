@@ -779,11 +779,11 @@ SPECS = [
         "listening ('bye', 'that's all, thanks', 'goodnight', 'end the conversation'). You say a short goodbye.",
         {}, []),
 ]
-HA_SPEC = _fn("home_assistant", "Control or ask about devices in the user's home through Home Assistant: lights, "
-              "switches, plugs, speakers and TV, thermostat, locks, the car, scenes and scripts (not computers or "
-              "servers, not general questions). Pass the request as a "
-              "short plain command or question naming the device or room, e.g. 'turn off the kitchen lights', "
-              "'which lights are on?', 'set the living room lamp to 30 percent', 'is the car locked?'.",
+HA_SPEC = _fn("home_assistant", "Control or ask about the user's smart home through Home Assistant: lights and "
+              "lamps (on, off, brightness, colour), plugs, music on the speakers and the TV (pause, skip, volume), "
+              "the thermostat, locks, the car (lock, climate, defrost), the vacuum, scenes and scripts (not "
+              "computers or servers, not general questions). Call it for every such request or question, and pass "
+              "the user's own words as the command, e.g. 'turn off the kitchen lights'.",
               {"command": {"type": "string", "description": "the request, in plain English"},
                "confirmed": {"type": "boolean", "description": "true only when you asked the user to confirm this "
                                                                "action and they just said yes"}}, ["command"])
@@ -865,7 +865,8 @@ def in_character(say: str, persona: str, n: int = 0) -> str:
     if not m:  # a status: 'The lamp is on, sir.'
         return say if re.search(r"\bsir\b", say, re.I) else re.sub(r"\.(\s|$)", r", sir.\1", say, count=1)
     rest = say[m.end():]
-    if re.match(r"(turned|set|switched|cancelled|added|removed|saved|asked)\b", rest):
+    if re.match(r"(turned|set|switched|toggled|cancelled|added|removed|saved|asked|started|made|paused|resumed|"
+                r"muted|unmuted)\b", rest):
         rest = "I've " + rest
     elif re.match(r"timer set\b", rest):
         rest = "I've set a timer" + rest[len("timer set"):]
@@ -949,6 +950,12 @@ class Toolbox:
     # -- Home Assistant, with a spoken confirmation for risky actions --
     def _home_assistant(self, command: str = "", confirmed=False) -> tuple[str, dict]:
         command = str(command or "").strip()
+        if HA_DIRECT and self.heard is not None:  # what the user said, when it's a command ha.py understands
+            try:
+                import ha
+                command = ha.pick(command, self.heard() or "", ha.devices(_ha_url(), ha_token(), max_age=ha.STATE_S))
+            except Exception as e:
+                print(f"home_assistant: can't check the user's words ({e!r})", flush=True)
         if not is_risky(command) or os.environ.get("MING_CONFIRM_RISKY", "1") == "0":
             return home_assistant(command)
         words = lambda s: set(re.findall(r"[a-z0-9]+", s.lower())) - {"the", "a", "my", "please", "can", "you"}
@@ -984,6 +991,13 @@ class Toolbox:
     def _jellyfin(self, action: str = "", query: str = "", device: str = "") -> tuple[str, dict]:
         if self.heard is not None:
             said = self.heard() or ""
+            if HA_DIRECT and "home_assistant" in self.names:  # "run movie mode" is a script, not a film
+                try:
+                    import ha
+                    if ha.script_named(said, ha.devices(_ha_url(), ha_token(), max_age=ha.STATE_S)):
+                        return self._home_assistant(said)
+                except Exception:
+                    pass
             play = str(action).strip().lower() == "play"
             if not (PLAY_RE if play else MEDIA_RE).search(said):
                 return ("Not done: the user isn't asking about watching or listening to something. Don't use "
@@ -1107,8 +1121,9 @@ def tool_guidance(home: str = "") -> str:
             "search when asked to research or compare current things), on the time in another place, or on exact "
             "arithmetic, or when the user asks you to do something a tool does (timers and reminders, their lists, "
             "remembering something, devices, media). You can always get the weather and look things up online, so never say you can't: call the "
-            "tool. Questions about the user's devices (which lights are on, is the car locked, the thermostat) need "
-            "home_assistant every time: they change, so never answer them from earlier in the conversation. "
+            "tool. Requests and questions about the user's devices and music (which lights are on, is the car locked, "
+            "skip this song, turn it up) need home_assistant every time: they change, so never answer them from "
+            "earlier in the conversation or guess. "
             "Your private note at the start of each reply has the user's local date and time; use get_current_time "
             "only for the time somewhere else. After a tool returns, answer "
             "from its results in one or two short spoken sentences, never reading out URLs, citation numbers or lists. "

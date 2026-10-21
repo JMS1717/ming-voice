@@ -53,6 +53,10 @@ CANT_LOOK_UP = re.compile(r"\b((live|real[- ]time|current|up[- ]to[- ]date|recen
                           r"a search engine|search(ing)? the (web|internet)|brows(e|ing)( the (web|internet))?|"
                           r"look (things|that|it) up|weather (data|forecasts?|information|updates)|"
                           r"a (weather )?forecast)\b", re.I)
+# ... and that dodge a music request instead of calling home_assistant ("What song would you like me to skip?")
+MUSIC_DODGE_START = re.compile(r"(what|which) (song|track|music|speaker)\b", re.I)
+MUSIC_DODGE = re.compile(r"\b(what|which) (song|track|music|speaker)\b|\bnothing (is )?(currently )?playing\b|"
+                         r"\b(no|any) (songs?|music|tracks?) (is |are )?(currently )?playing\b|\bmusic app\b", re.I)
 # replies that say a list or memory changed: (pattern, tool, action) to run when no tool was called
 CLAIMS = [
     (re.compile(r"\b(off (of )?(your|the)( [\w-]+)? list|removed|crossed|no longer on|list now (only )?has)\b",
@@ -1043,7 +1047,7 @@ class Thinker:
         # says it can't look anything up. So a reply that opens like a refusal is held back to its first sentence
         # end; if that claims no live data / search / weather, the reply starts over as that tool call instead.
         tool_names = {s.get("function", s).get("name") for s in self.tools.specs} if self.tools is not None else set()
-        snap = self.snapshot() if "web_search" in tool_names else None
+        snap = self.snapshot() if tool_names & {"web_search", "home_assistant"} else None
         tok = self._prefill(ids, feats)
         held, retry, forced, quiet = snap is not None, None, None, False
         gen: list[int] = []  # the spoken reply (text of every round, tool calls excluded)
@@ -1072,10 +1076,15 @@ class Thinker:
                         if held and not full.endswith("�"):
                             head = full.strip()
                             if len(head.split()) >= 4 or SENTENCE_END.search(full):
-                                if not REFUSAL_START.match(head) or len(head.split()) > 30:
+                                music = "home_assistant" in tool_names
+                                if not (REFUSAL_START.match(head) or music and MUSIC_DODGE_START.match(head)) \
+                                        or len(head.split()) > 30:
                                     held = False
                                 elif SENTENCE_END.search(full):
                                     held = False
+                                    if music and MUSIC_DODGE.search(head):
+                                        retry = "home_assistant"
+                                        break
                                     m = CANT_LOOK_UP.search(head)
                                     if m and "web_search" in tool_names:
                                         weather = re.search(r"weather|forecast", m.group(), re.I)
@@ -1102,10 +1111,10 @@ class Thinker:
                                         break
                     tok = self._step(tok)
                 if retry and not cancel.is_set():
-                    log(f"reply said it can't look things up ({self.tok.decode(gen, skip_special_tokens=True)!r}): "
+                    log(f"reply dodged its tool ({self.tok.decode(gen, skip_special_tokens=True)!r}): "
                         f"calling {retry} instead")
                     self.restore(snap)
-                    arg = "location" if retry == "get_weather" else "query"
+                    arg = {"get_weather": "location", "home_assistant": "command"}.get(retry, "query")
                     forced = self.tok(f"<tool_call>{retry}\n<arg_key>{arg}</arg_key>\n<arg_value>",
                                       add_special_tokens=False).input_ids
                     tok = self._prefill(torch.cat([ids, torch.tensor([forced], device=DEVICE)], 1), feats)

@@ -36,7 +36,10 @@ Brave Search, and Open-Meteo); turn tools off in Settings to stay fully offline.
 - Web search, weather, calculator and clock
 - **Timers and reminders** that ring again until you answer
 - **Shopping and to-do lists**, and **remembering things you tell it** ("I parked on level 3")
-- **Home Assistant** (lights, plugs, thermostat, locks, media), **Jellyfin**, and hand-off to a **Hermes Agent** for bigger jobs
+- **Home Assistant**: lights and plugs (on/off, brightness, "dimmer", colours, warm white), music and TVs (pause, skip,
+  volume, "what's playing?"), thermostat, locks, the car (climate, temperature, defrost), the vacuum, scripts and scenes
+  by name. Follow-ups work ("now turn it off", "and the living room too"), and the user's own words are used, not the
+  model's rewording. Also **Jellyfin**, and hand-off to a **Hermes Agent** for bigger jobs
 - Risky actions (unlocking, opening the garage) are **confirmed first**
 - **Jarvis mode**: a dry-witted British robot butler ("Certainly, sir.") with its own designed voice and wake word
 - Say **"that's all, bye"** and it ends the conversation (in wake-word mode it goes back to sleep)

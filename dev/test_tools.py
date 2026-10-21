@@ -95,18 +95,20 @@ for cmd in ("disarm the alarm", "turn off the security system", "raise the garag
 import ha as hamod  # noqa: E402  the device list and commands (a made-up home: nothing is called)
 st = lambda eid, state, name, **a: {"entity_id": eid, "state": state, "attributes": {"friendly_name": name, **a}}  # noqa: E731
 home = hamod.build(
-    [st("light.ceiling", "on", "Ceiling Light", brightness=128), st("switch.reading_lamp", "off", "Reading Lamp"),
+    [st("light.ceiling", "on", "Ceiling Light", brightness=128, supported_color_modes=["hs", "color_temp"]), st("switch.reading_lamp", "off", "Reading Lamp"),
      st("switch.plug_1", "on", "Corner"), st("switch.reading_lamp_led", "on", "Reading Lamp LED"),
      st("switch.coffee", "off", "Coffee Maker"), st("switch.strip", "unavailable", "Bed Strip"),
      st("media_player.tv", "off", "Den TV"), st("switch.tv_lights", "off", "TV Lights"),
      st("lock.car_door", "locked", "Car Door Lock"), st("climate.car", "off", "Car Climate"),
      st("climate.hall", "heat", "Hallway", current_temperature=68, temperature=70), st("vacuum.robo", "docked", "Robo"),
-     st("input_boolean.helper", "on", "Lamp Automation"), st("sensor.temp", "20", "Temperature")],
+     st("input_boolean.helper", "on", "Lamp Automation"), st("sensor.temp", "20", "Temperature"),
+     st("media_player.kitchen", "playing", "Kitchen Speaker", media_title="Blue Song", media_artist="A Band"),
+     st("script.movie_night", "off", "Movie Night"), st("light.left_shelf", "off", "Left Shelf")],
     [{"entity_id": "switch.reading_lamp_led", "entity_category": "config"},
      {"entity_id": "switch.plug_1", "device_id": "d1"}, {"entity_id": "switch.strip", "area_id": "bed"},
      {"entity_id": "light.ceiling", "area_id": "den"}, {"entity_id": "switch.reading_lamp", "area_id": "den"},
      {"entity_id": "switch.coffee", "area_id": "kitchen"}, {"entity_id": "media_player.tv", "area_id": "den"},
-     {"entity_id": "switch.tv_lights", "area_id": "den"},
+     {"entity_id": "switch.tv_lights", "area_id": "den"}, {"entity_id": "media_player.kitchen", "area_id": "kitchen"},
      {"entity_id": "lock.car_door", "device_id": "car", "platform": "some_cloud"},
      {"entity_id": "climate.car", "device_id": "car", "platform": "some_cloud"}],
     [{"id": "d1", "name": "Smart Plug", "area_id": "den"}, {"id": "car", "name": "My Car", "manufacturer": "Kia"}],
@@ -115,14 +117,21 @@ home = hamod.build(
 byid = {d["id"]: d for d in home}
 check("switch.reading_lamp_led" not in byid and "sensor.temp" not in byid, "config entities and sensors are left out")
 check([d["id"] for d in home if d["light"]] == ["light.ceiling", "switch.reading_lamp", "switch.plug_1",
-                                                 "switch.strip", "switch.tv_lights"], "lamps on plugs count as lights")
+                                                 "switch.strip", "switch.tv_lights", "light.left_shelf"],
+      "lamps on plugs count as lights")
 check(byid["lock.car_door"]["car"] and not byid["climate.hall"]["car"], "the car's devices")
 for cmd, action, want in (
         ("turn off the den lights", "off", ["light.ceiling", "switch.reading_lamp", "switch.plug_1", "switch.tv_lights"]),
         ("Turn on the family room lights please", "on", ["light.ceiling", "switch.reading_lamp", "switch.plug_1",
                                                           "switch.tv_lights"]),
         ("which lights are on?", "status", ["light.ceiling", "switch.reading_lamp", "switch.plug_1", "switch.strip",
-                                            "switch.tv_lights"]),
+                                            "switch.tv_lights", "light.left_shelf"]),
+        ("did I leave the left shelf on?", "status", ["light.left_shelf"]),
+        ("what's the temperature in the car?", "status", ["climate.car"]), ("warm up the car", "on", ["climate.car"]),
+        ("turn the ceiling light blue", "color", ["light.ceiling"]), ("pause the music", "pause", ["media_player.kitchen"]),
+        ("skip this song", "next", ["media_player.kitchen"]),
+        ("turn up the volume in the kitchen", "volume_up", ["media_player.kitchen"]),
+        ("run movie night", "on", ["script.movie_night"]), ("send the vacuum back to its dock", "dock", ["vacuum.robo"]),
         ("turn on the reading lamp", "on", ["switch.reading_lamp"]), ("turn off the TV", "off", ["media_player.tv"]),
         ("is the car locked?", "status", ["lock.car_door"]), ("lock the car", "lock", ["lock.car_door"]),
         ("set the thermostat to 72", "temperature", ["climate.hall"]), ("start the vacuum", "on", ["vacuum.robo"]),
@@ -133,6 +142,7 @@ for cmd, action, want in (
     check(p["action"] == action and got == want, f"ha {cmd!r} -> {action} {want} (got {p['action']} {got})")
 called = []
 hamod.call_service = lambda b, t, dom, svc, data: called.append((dom, svc, data))
+hamod.fetch = lambda b, t: home  # (states are re-read every couple of seconds)
 hamod._cache.update(t=time.time(), devices=home)
 r = hamod.handle("turn off the den lights", "", "")
 check(called == [("light", "turn_off", {"entity_id": ["light.ceiling"]}),
@@ -146,6 +156,32 @@ check(not called and r[1]["say"] == "None of the lights in the Bedroom are on. B
 r = hamod.handle("dim the den lights to 40 percent", "", "")
 check(called == [("light", "turn_on", {"brightness_pct": 40, "entity_id": ["light.ceiling"]})]
       and "can't be dimmed" in r[1]["say"], f"dimming plugs: {r}")
+called.clear()
+r = hamod.handle("make the den lights warm white", "", "")
+check(called == [("light", "turn_on", {"color_temp_kelvin": 2700, "entity_id": ["light.ceiling"]})]
+      and r[1]["say"].startswith("Okay, the Ceiling Light is warm white now.") and "can't change colour" in r[1]["say"],
+      f"colour temperature (plugs can't): {r}")
+called.clear()
+hamod._cache.update(t=time.time(), devices=home)
+hamod.handle("turn off the reading lamp", "", "")
+r = hamod.handle("now turn it on", "", "")  # (about the last command)
+check(called == [("switch", "turn_on", {"entity_id": ["switch.reading_lamp"]})], f"'it' is the last device: {called} {r}")
+called.clear()
+r = hamod.handle("set the volume to 30 percent", "", "")
+check(called == [("media_player", "volume_set", {"volume_level": 0.3, "entity_id": ["media_player.kitchen"]})],
+      f"volume of what's playing: {called} {r}")
+called.clear()
+quiet = [dict(d, state="idle") if d["domain"] == "media_player" else d for d in home]
+r = (hamod.act("", "", hamod.resolve(quiet, hamod.parse("turn the volume down"))[0], hamod.parse("turn the volume down")),
+     hamod.act("", "", hamod.resolve(quiet, hamod.parse("play it again"))[0], hamod.parse("play it again")))
+check(not called and r[0][1]["say"] == "Nothing is playing right now." and "nothing paused" in r[1][1]["say"],
+      f"no music: not every speaker in the house: {called} {r}")
+heard = "what's the temperature in the car?"  # the model's rewording vs what the user said
+check(hamod.pick("is the car locked?", heard, home) == heard and hamod.pick("turn on the den lights", "uh, yes", home)
+      == "turn on the den lights" and hamod.pick("turn off the lamp", "turn off the lamp and lock the car", home)
+      == "turn off the lamp", "pick: the user's own words when they're a command")
+check(hamod.script_named("run movie night mode", home) and not hamod.script_named("play a movie", home),
+      "a script by name isn't a film")
 eb = Toolbox(specs=tools.SPECS)  # ending the conversation only when the user said goodbye
 for said, ok in (("okay thanks, bye", True), ("that's all for now", True), ("end the conversation", True),
                  ("goodnight ming", True), ("what's the weather tomorrow", False), ("stop", False)):
