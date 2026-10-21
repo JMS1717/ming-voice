@@ -3,7 +3,7 @@
 Low-latency, fully local **speech-to-speech** voice assistant built on
 [inclusionAI/Ming-3.0-audio-tiny](https://huggingface.co/inclusionAI/Ming-3.0-audio-tiny), running on an
 **AMD Radeon GPU** (ROCm 7.2 inside WSL2 on Windows). Talk to it in the browser; it answers out loud,
-typically starting to speak **~0.4 s after you stop talking**.
+typically starting to speak **~0.3 s after you stop talking**.
 
 * Hands-free conversation with voice activity detection, or push-to-talk
 * **Smart turn detection** ([Smart Turn v3](https://huggingface.co/pipecat-ai/smart-turn-v3)): judges from your
@@ -24,8 +24,8 @@ Everything runs locally; no audio leaves the machine.
 
 | | |
 |---|---|
-| From the end of your speech to the first audio | ~0.39 s median (end-of-turn pause ~0.26 s when Smart Turn is confident, generation already under way) |
-| Thinker (audio LLM, 9.3B MoE / 2.7B active) | ~67 tokens/s decode; first token ~80 ms after a short spoken turn (~65 ms typed) |
+| From the end of your speech to the first audio | ~0.29 s median (end-of-turn pause ~0.26 s when Smart Turn is confident; the reply is generated during the pause) |
+| Thinker (audio LLM, 9.3B MoE / 2.7B active) | ~115 tokens/s decode; first token ~80 ms after a short spoken turn (~65 ms typed) |
 | Talker (speech synthesis) | ~0.3× real time end to end; 13 ms per 80 ms of audio for the core step |
 | Startup | ~30 s (first start after install: ~1–2 min to compile kernels) |
 | VRAM | ~20.5 GB bf16 · ~12.5 GB with int8 experts (auto on < 23 GB cards) |
@@ -144,6 +144,7 @@ never disturb a live conversation. `dev/test_api.py` exercises every endpoint.
 | `MING_CFM_STEPS` | `10` | Talker flow-matching steps (fewer is faster but degrades speech). |
 | `MING_SMART_TURN` | `1` | Smart Turn end-of-turn detection (needs `model_extra/smart-turn-v3.2-cpu.onnx`, downloaded by `setup_env.sh`). |
 | `MING_FUSED_PREFILL` | `1` | Grouped Triton MoE kernels for prompt prefill (`0` = the reference per-expert loop). |
+| `MING_FUSED_OPS` | `1` | Triton RMSNorm and one-token MoE router (`0` = the reference PyTorch ops). |
 | `MING_FAST_TALKER` / `MING_GRAPHS` | `1` / `1` | Fused Triton Talker path / HIP graphs (set `0` to fall back to the reference code). |
 | `MING_TRACEMALLOC` | `0` | Python allocation tracing for `/api/debug/mem`. |
 

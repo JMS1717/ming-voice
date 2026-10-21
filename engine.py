@@ -175,6 +175,36 @@ def _get_audio_features_trimmed(self, audio_feats, audio_feats_lengths):
 
 
 _FUSED_PREFILL = os.environ.get("MING_FUSED_PREFILL", "1") == "1"
+_FUSED_OPS = os.environ.get("MING_FUSED_OPS", "1") == "1"  # Triton RMSNorm + one-token MoE router
+
+
+def _patch_norms(model):
+    """Every BailingMoeV3RMSNorm -> one Triton kernel (the PyTorch version is ~8 kernels per call)."""
+    from types import MethodType
+
+    from fused_ops import rms_norm
+    n = 0
+    for module in model.modules():
+        if type(module).__name__ == "BailingMoeV3RMSNorm":
+            module.forward = MethodType(lambda self, h: rms_norm(h, self.weight, self.variance_epsilon), module)
+            n += 1
+    return n
+
+
+def _route_one(block, hidden_states):
+    """Router for a single token -> (ids incl. the shared expert, fp32 weights, aux) via fused_ops.moe_route."""
+    from fused_ops import moe_route
+    g = block.gate
+    if not hasattr(block, "r_ids"):
+        E = g.w32.shape[0]
+        block.r_logits = torch.empty(E, dtype=torch.float32, device=DEVICE)
+        block.r_ids = torch.empty(g.top_k + 1, dtype=torch.long, device=DEVICE)
+        block.r_wts = torch.empty(g.top_k + 1, dtype=torch.float32, device=DEVICE)
+        block.r_bias = g.expert_bias.float()
+    moe_route(hidden_states.reshape(1, -1), g.w32, block.r_bias, g.n_group, g.topk_group, g.top_k,
+              g.routed_scaling_factor, block.r_logits, block.r_ids, block.r_wts)
+    aux = (block.r_logits.view(1, 1, -1), block.r_ids[:g.top_k].view(1, 1, -1))
+    return block.r_ids, block.r_wts, aux
 
 
 def _moe_prefill(block, x, topk_idx, topk_weight):
@@ -252,6 +282,10 @@ def _patch_moe(model):
             bsz, seq_len, h = hidden_states.shape
             if bsz * seq_len != 1 and not _FUSED_PREFILL:
                 return _orig(hidden_states)
+            if bsz * seq_len == 1 and _FUSED_OPS:
+                ids, wts, aux = _route_one(self, hidden_states)
+                y = fused_moe_decode(hidden_states.view(1, h), self.w_gu, self.w_d, ids, wts)
+                return y.view(bsz, seq_len, h), aux
             topk_idx, topk_weight, router_logits = self.gate(hidden_states)
             aux = (router_logits.view(bsz, seq_len, -1), topk_idx.view(bsz, seq_len, -1))
             if bsz * seq_len != 1:
@@ -311,6 +345,11 @@ def _quantize_moe_int8(model):
 
         def forward(self, hidden_states):
             bsz, seq_len, h = hidden_states.shape
+            if bsz * seq_len == 1 and _FUSED_OPS:
+                ids, wts, aux = _route_one(self, hidden_states)
+                y = fused_moe_decode(hidden_states.view(1, h), self.q_gu, self.q_d, ids, wts,
+                                     s_gu=self.s_gu, s_d=self.s_d)
+                return y.view(bsz, seq_len, h), aux
             topk_idx, topk_weight, router_logits = self.gate(hidden_states)
             aux = (router_logits.view(bsz, seq_len, -1), topk_idx.view(bsz, seq_len, -1))
             if bsz * seq_len == 1:
@@ -464,6 +503,8 @@ class Thinker:
         from types import MethodType
         self.model._get_audio_features = MethodType(_get_audio_features_trimmed, self.model)
         n = _patch_moe(self.model)
+        if _FUSED_OPS:
+            _patch_norms(self.model)
         if getattr(self, "int8_experts", None) is None:
             self.int8_experts = _want_int8_experts()
         if self.int8_experts:
