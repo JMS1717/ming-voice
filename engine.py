@@ -63,6 +63,8 @@ CLAIMS = [
      "lists", "add"),
     (re.compile(r"\b(i'll|i will) remember\b", re.I), "memory", "remember"),
 ]
+BYE = re.compile(r"\b(bye|goodbye|good ?night|talk to you (later|soon)|see you|have a (great|good|nice|lovely|wonderful) "
+                 r"(day|night|evening|weekend|one)|until next time|take care)\b", re.I)  # (a reply saying goodbye)
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are Ming, a friendly, helpful voice assistant in a live spoken conversation. "
@@ -1046,7 +1048,7 @@ class Thinker:
         held, retry, forced, quiet = snap is not None, None, None, False
         gen: list[int] = []  # the spoken reply (text of every round, tool calls excluded)
         emitted = ""
-        seen, used_tools = set(), False
+        seen, used_tools, ended = set(), False, False
         answer_from = None  # where the answer from tool results starts in `emitted`
         capped = True  # ANSWER_WORDS applies (until the transcript shows the user asked for something long)
         try:
@@ -1149,6 +1151,7 @@ class Thinker:
                         yield {"type": "tool_result", "name": name, "args": args, **info}
                     results.append(text)
                     says.append(info.get("say"))
+                    ended = ended or bool(info.get("end"))
                 if cancel.is_set():
                     break
                 if all(says):
@@ -1159,7 +1162,9 @@ class Thinker:
                            + "".join(f"\n<tool_response>\n{r}\n</tool_response>" for r in results)
                            + ROLE_END + "<role>ASSISTANT</role>\n<think></think>")
                     o_ids = self.tok(obs, add_special_tokens=False).input_ids
-                    if quiet and "n't" not in say:  # (done as the reply already said: nothing to add)
+                    if (quiet and "n't" not in say) or (emitted.strip() and all(n == "end_conversation"
+                                                                                for n, _ in calls)):
+                        # (done as the reply already said / it already said goodbye: nothing to add)
                         if self.cur_len + len(o_ids) + 8 < self.max_ctx:
                             self._prefill(torch.tensor([o_ids], device=DEVICE), {})
                         break
@@ -1185,6 +1190,13 @@ class Thinker:
                 tok = self._prefill(ids, {})
                 if any(n not in BRIEF_TOOLS for n, _ in calls):
                     answer_from = len(emitted)
+            if (events and not ended and "end_conversation" in tool_names and not cancel.is_set()
+                    and BYE.search(emitted)):
+                # it said goodbye without ending the conversation: end it if the user did say goodbye
+                from tools import END_RE
+                if END_RE.search(said()):
+                    log(f"reply said goodbye ({emitted!r}) without end_conversation: ending it")
+                    yield {"type": "tool_result", "name": "end_conversation", "args": {}, "end": True}
             if used_tools and not emitted.strip() and not cancel.is_set():  # tools led nowhere: don't go silent
                 sorry = "Sorry, I couldn't get that done."
                 gen += self.tok(sorry, add_special_tokens=False).input_ids
@@ -1324,8 +1336,7 @@ class Talker:
         if use_graphs:
             self._capture()
         self.anchors = {}
-        if os.environ.get("MING_VOICE_ANCHORS", "1") == "1":
-            self.load_anchors()
+        self.load_anchors(designed_only=os.environ.get("MING_VOICE_ANCHORS", "1") != "1")
         log(f"Talker loaded in {time.time() - t:.1f}s (read {t_read - t:.1f}s, build {t_build - t_read:.1f}s, "
             f"fast path {t_fast - t_build:.1f}s, graphs {time.time() - t_fast:.1f}s), "
             f"{torch.cuda.memory_allocated() / 2**30:.2f} GiB")
@@ -1402,12 +1413,20 @@ class Talker:
     # latents); every fragment continues from it, which holds the speaker and the clip's pace steady.
     ANCHOR_DIR = Path(__file__).resolve().parent / "anchors"
 
-    def load_anchors(self):
+    # A designed voice (dev/design_voice.py) is a voice-design instruction ("a refined English butler...") and an
+    # anchor made with it: on its own, every fragment would be a different speaker that fits the description.
+    def load_anchors(self, designed_only=False):
         for f in sorted(self.ANCHOR_DIR.glob("*.pt")):
             a = torch.load(f, map_location="cpu")
-            self.anchors[f.stem] = self.make_anchor(a["text"], a["latents"])
+            if a.get("instruction") or not designed_only:
+                self.anchors[f.stem] = dict(self.make_anchor(a["text"], a["latents"]),
+                                            instruction=a.get("instruction"))
         if self.anchors:
             log(f"voice anchors: {', '.join(self.anchors)}")
+
+    @property
+    def designed_voices(self) -> list[str]:
+        return [v for v, a in self.anchors.items() if a.get("instruction")]
 
     @torch.inference_mode()
     def make_anchor(self, text: str, latents: torch.Tensor) -> dict:
@@ -1434,7 +1453,8 @@ class Talker:
         cloned = isinstance(voice, torch.Tensor)  # speaker embedding from speaker_from_audio()
         language, text = tp.resolve_request_language(text, language=None, taskname="TTS" if cloned else "IP")
         prompt = tp.append_optional_target_language(tp.DEFAULT_TTS_PROMPT, language)
-        instruction = None if cloned else tp.build_task_instruction("IP", ip=voice)
+        designed = (self.anchors.get(voice) or {}).get("instruction") if not cloned else None
+        instruction = None if cloned else designed or tp.build_task_instruction("IP", ip=voice)
         skip_tn = tp.preserve_multilingual_text(tp.target_language_from_prompt(prompt))
         out = []
         for fragment in self.t.text_fragments(text):

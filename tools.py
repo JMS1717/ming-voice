@@ -426,12 +426,38 @@ def ha_token() -> str:
         return ""
 
 
+# Direct control sees every device the token can (not only those exposed to Assist); MING_HA_DIRECT=0: Assist only.
+HA_DIRECT = os.environ.get("MING_HA_DIRECT", "1") == "1"
+
+
 def home_assistant(command: str) -> tuple[str, dict]:
-    """Hand a spoken-style command or question to Home Assistant's own intent handling (Assist), which resolves
-    device/area names and aliases and only touches entities exposed to voice assistants in HA."""
+    """Do a spoken-style command or answer a question about the user's devices: directly from HA's device list
+    (ha.py: lights, plugs, locks, thermostat, ...), else through HA's own intent handling (Assist)."""
     command = (command or "").strip()
     if not command:
         return "Error: empty command.", {}
+    if not HA_DIRECT:
+        return assist(command)
+    import ha
+    try:
+        done = ha.handle(command, _ha_url(), ha_token())
+    except Exception as e:  # (the websocket API unreachable, ...: Assist may still manage)
+        print(f"home_assistant: direct control failed ({e!r}); trying Assist", flush=True)
+        done = None
+    if done is not None:
+        return done
+    text, info = assist(command)
+    if info.get("response_type") == "error":
+        try:  # it didn't know what was meant: tell the model what there is
+            text += f" Devices in the home: {ha.names_by_area(ha.devices(_ha_url(), ha_token()))}."
+        except Exception:
+            pass
+    return text, info
+
+
+def assist(command: str) -> tuple[str, dict]:
+    """Hand the command to Home Assistant's own intent handling (Assist), which resolves device/area names and
+    aliases and only touches entities exposed to voice assistants in HA."""
     req = urllib.request.Request(f"{_ha_url()}/api/conversation/process", method="POST",
                                  data=json.dumps({"text": command, "language": "en",
                                                   "agent_id": "conversation.home_assistant"}).encode(),
@@ -749,12 +775,15 @@ SPECS = [
         {"action": {"type": "string", "enum": ["remember", "forget"]},
          "fact": {"type": "string", "description": "one short sentence, e.g. 'The user's sister's birthday is May 3.'"}},
         ["action", "fact"]),
+    _fn("end_conversation", "End the conversation when the user says goodbye or asks you to end it or stop "
+        "listening ('bye', 'that's all, thanks', 'goodnight', 'end the conversation'). You say a short goodbye.",
+        {}, []),
 ]
 HA_SPEC = _fn("home_assistant", "Control or ask about devices in the user's home through Home Assistant: lights, "
               "switches, plugs, speakers and TV, thermostat, locks, the car, scenes and scripts (not computers or "
               "servers, not general questions). Pass the request as a "
               "short plain command or question naming the device or room, e.g. 'turn off the kitchen lights', "
-              "'set the living room lamp to 30 percent', 'is the car locked?'.",
+              "'which lights are on?', 'set the living room lamp to 30 percent', 'is the car locked?'.",
               {"command": {"type": "string", "description": "the request, in plain English"},
                "confirmed": {"type": "boolean", "description": "true only when you asked the user to confirm this "
                                                                "action and they just said yes"}}, ["command"])
@@ -764,6 +793,22 @@ RISKY_RE = re.compile(r"\b(unlock|disarm)|\b(open|raise|lift)\b.*\b(garage|gate|
                       r"|\b(alarm|security)\b.*\b(off|disable|deactivate)\b|\b(off|disable|deactivate)\b.*\b(alarm|security)\b",
                       re.I)
 CONFIRM_WINDOW_S = 60
+
+
+def ha_spec() -> dict:
+    """HA_SPEC, naming the user's devices by room (so the model knows "the reading lamp" is one of them)."""
+    spec = json.loads(json.dumps(HA_SPEC))
+    if not HA_DIRECT:
+        return spec
+    try:
+        import ha
+        known = ha.names_by_area(ha.devices(_ha_url(), ha_token()))
+    except Exception as e:
+        print(f"home_assistant: can't list the devices ({e!r})", flush=True)
+        known = ""
+    if known:
+        spec["function"]["description"] += f" The user's devices: {known}."
+    return spec
 
 
 def is_risky(command: str) -> bool:
@@ -798,6 +843,33 @@ HERMES_AUTO_SPEC = _fn("ask_hermes", "Delegate a task to Hermes, the user's more
 PLAY_RE = re.compile(r"\b(play|watch|put on|throw on|listen|start|resume|continue|queue|shuffle|next episode)", re.I)
 MEDIA_RE = re.compile(PLAY_RE.pattern[:-1] + r"|jellyfin|movie|film|show|series|season|episode|song|music|album|"
                       r"artist|track|pause|stop|skip|next|previous|back|playing|library|tv|seen|have)", re.I)
+# what ending the conversation sounds like (end_conversation only runs when the user said something like it)
+END_RE = re.compile(r"\b(bye|goodbye|good ?night|that'?s (all|it)|that is (all|it)|end (the |this |our )?"
+                    r"(conversation|chat|call|session)|stop (listening|the conversation)|hang up|we'?re (done|good)|"
+                    r"i'?m (done|good)|talk (to you )?(later|soon|tomorrow)|see (you|ya)|later|go to sleep|"
+                    r"sleep now|no more questions|nothing else|i'?m all set|over and out|exit|quit)\b", re.I)
+GOODBYES = ["Okay, bye!", "Bye for now!", "Talk to you later!", "Okay, see you later!"]
+# The butler persona (Jarvis preset): what the tools say themselves, in character
+BUTLER_GOODBYES = ["Very good, sir. I'll be here if you need me.", "As you wish, sir. Until next time.",
+                   "Of course, sir. Do call if anything comes up.", "Very good, sir. I shall keep an eye on things."]
+BUTLER_OPENERS = ["Very good, sir.", "Right away, sir.", "Certainly, sir.", "Done, sir.", "Of course, sir."]
+
+
+def in_character(say: str, persona: str, n: int = 0) -> str:
+    """'Okay, turned off the lamp.' -> 'Certainly, sir. I've turned off the lamp.' (persona 'jarvis')."""
+    if persona != "jarvis" or not say:
+        return say
+    if say.startswith("Just to be sure: do you want me to "):
+        return "Just to confirm, sir: shall I " + say[len("Just to be sure: do you want me to "):]
+    m = re.match(r"(okay|ok|alright|sure)[,.!]?\s+", say, re.I)
+    if not m:  # a status: 'The lamp is on, sir.'
+        return say if re.search(r"\bsir\b", say, re.I) else re.sub(r"\.(\s|$)", r", sir.\1", say, count=1)
+    rest = say[m.end():]
+    if re.match(r"(turned|set|switched|cancelled|added|removed|saved|asked)\b", rest):
+        rest = "I've " + rest
+    elif re.match(r"timer set\b", rest):
+        rest = "I've set a timer" + rest[len("timer set"):]
+    return f"{BUTLER_OPENERS[n % len(BUTLER_OPENERS)]} {rest[:1].upper()}{rest[1:]}"
 HERMES_NAME_RE = re.compile(r"\b(h[eu]rm[eèéi]|erm[eè]s)", re.I)  # (and how ASR writes it: Hermès, Hermies, ...)
 
 
@@ -818,7 +890,7 @@ class Toolbox:
 
     def __init__(self, specs=None, home: str = ""):
         if specs is None:  # the default set, plus Home Assistant / Hermes once configured
-            specs = SPECS + ([HA_SPEC] if ha_token() else []) + ([JELLYFIN_SPEC] if jellyfin_config() else [])
+            specs = SPECS + ([ha_spec()] if ha_token() else []) + ([JELLYFIN_SPEC] if jellyfin_config() else [])
             hermes = hermes_config()
             if hermes:  # (optional "about" in .hermes.json: e.g. which servers it runs on)
                 specs = specs + [json.loads(json.dumps(HERMES_AUTO_SPEC if hermes_auto() else HERMES_SPEC))]
@@ -833,6 +905,7 @@ class Toolbox:
         self.turn = 0  # conversation turns (Thinker.stream): a confirmation has to come in a later turn
         self._confirm = None  # (command, turn, time) of a risky action waiting for the user's yes
         self.heard = None  # () -> what the user said this turn (transcribed on first use; Thinker.stream sets it)
+        self.persona = ""  # "jarvis": what the tools say is said in character (in_character)
 
     def new_turn(self, heard=None):
         self.turn += 1
@@ -850,7 +923,8 @@ class Toolbox:
         """-> (result text for the model, info for the UI: query/sources/elapsed/error)"""
         t0 = time.perf_counter()
         impl = ({**_IMPL, "ask_hermes": self._ask_hermes, "timer": self._timer, "jellyfin": self._jellyfin,
-                 "home_assistant": self._home_assistant}).get(name) if name in self.names else None
+                 "home_assistant": self._home_assistant, "end_conversation": self._end_conversation}
+                ).get(name) if name in self.names else None
         if impl is None:
             return f"Error: there is no tool named {name!r}.", {"error": "unknown tool"}
         args = {k: v for k, v in (args or {}).items() if isinstance(k, str)}
@@ -867,6 +941,8 @@ class Toolbox:
         if not (info or {}).get("say") and name != "lists":  # (said right before it answers, this works better than in the system prompt)
             text += "\n(Answer from this in one or two short spoken sentences: no lists, no URLs, no follow-up offers.)"
         info = dict(info or {}, elapsed_ms=round((time.perf_counter() - t0) * 1000))
+        if info.get("say"):
+            info["say"] = in_character(info["say"], self.persona, self.turn)
         return text, info
 
 
@@ -891,6 +967,18 @@ class Toolbox:
         return (f"Not done yet: this needs the user's confirmation, and you asked them: \"{say}\" If they say yes, "
                 f"call home_assistant again with the same command and confirmed=true; otherwise don't.",
                 {"say": say, "needs_confirmation": True})
+
+    # -- the user said goodbye: the server ends the conversation once the goodbye has played --
+    def _end_conversation(self, **_) -> tuple[str, dict]:
+        said = self.heard() if self.heard is not None else ""
+        if self.heard is not None and not END_RE.search(said or ""):
+            return ("Not ended: the user didn't say goodbye. Carry on with the conversation: answer what they "
+                    "said."), {"refused": True, "heard": said}
+        butler = self.persona == "jarvis"
+        say = (BUTLER_GOODBYES if butler else GOODBYES)[self.turn % len(GOODBYES)]
+        if re.search(r"good ?night", said or "", re.I):
+            say = "Good night, sir. Sleep well." if butler else "Good night!"
+        return "Ended.", {"say": say, "end": True}
 
     # -- Jellyfin: playback only when the user asked for it ("tell me a joke" once tried to play "Joke & Dagger") --
     def _jellyfin(self, action: str = "", query: str = "", device: str = "") -> tuple[str, dict]:
@@ -1019,7 +1107,9 @@ def tool_guidance(home: str = "") -> str:
             "search when asked to research or compare current things), on the time in another place, or on exact "
             "arithmetic, or when the user asks you to do something a tool does (timers and reminders, their lists, "
             "remembering something, devices, media). You can always get the weather and look things up online, so never say you can't: call the "
-            "tool. Your private note at the start of each reply has the user's local date and time; use get_current_time "
+            "tool. Questions about the user's devices (which lights are on, is the car locked, the thermostat) need "
+            "home_assistant every time: they change, so never answer them from earlier in the conversation. "
+            "Your private note at the start of each reply has the user's local date and time; use get_current_time "
             "only for the time somewhere else. After a tool returns, answer "
             "from its results in one or two short spoken sentences, never reading out URLs, citation numbers or lists. "
             "If the results don't answer the question, say so briefly." + remembered())

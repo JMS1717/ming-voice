@@ -92,6 +92,71 @@ for cmd in ("is the garage open?", "Is the garage door open", "lock the front do
     check(not tools.is_risky(cmd), f"not risky: {cmd}")
 for cmd in ("disarm the alarm", "turn off the security system", "raise the garage door", "open the gate"):
     check(tools.is_risky(cmd), f"risky: {cmd}")
+import ha as hamod  # noqa: E402  the device list and commands (a made-up home: nothing is called)
+st = lambda eid, state, name, **a: {"entity_id": eid, "state": state, "attributes": {"friendly_name": name, **a}}  # noqa: E731
+home = hamod.build(
+    [st("light.ceiling", "on", "Ceiling Light", brightness=128), st("switch.reading_lamp", "off", "Reading Lamp"),
+     st("switch.plug_1", "on", "Corner"), st("switch.reading_lamp_led", "on", "Reading Lamp LED"),
+     st("switch.coffee", "off", "Coffee Maker"), st("switch.strip", "unavailable", "Bed Strip"),
+     st("media_player.tv", "off", "Den TV"), st("switch.tv_lights", "off", "TV Lights"),
+     st("lock.car_door", "locked", "Car Door Lock"), st("climate.car", "off", "Car Climate"),
+     st("climate.hall", "heat", "Hallway", current_temperature=68, temperature=70), st("vacuum.robo", "docked", "Robo"),
+     st("input_boolean.helper", "on", "Lamp Automation"), st("sensor.temp", "20", "Temperature")],
+    [{"entity_id": "switch.reading_lamp_led", "entity_category": "config"},
+     {"entity_id": "switch.plug_1", "device_id": "d1"}, {"entity_id": "switch.strip", "area_id": "bed"},
+     {"entity_id": "light.ceiling", "area_id": "den"}, {"entity_id": "switch.reading_lamp", "area_id": "den"},
+     {"entity_id": "switch.coffee", "area_id": "kitchen"}, {"entity_id": "media_player.tv", "area_id": "den"},
+     {"entity_id": "switch.tv_lights", "area_id": "den"},
+     {"entity_id": "lock.car_door", "device_id": "car", "platform": "some_cloud"},
+     {"entity_id": "climate.car", "device_id": "car", "platform": "some_cloud"}],
+    [{"id": "d1", "name": "Smart Plug", "area_id": "den"}, {"id": "car", "name": "My Car", "manufacturer": "Kia"}],
+    [{"area_id": "den", "name": "Den", "aliases": ["family room"]}, {"area_id": "bed", "name": "Bedroom"},
+     {"area_id": "kitchen", "name": "Kitchen"}])
+byid = {d["id"]: d for d in home}
+check("switch.reading_lamp_led" not in byid and "sensor.temp" not in byid, "config entities and sensors are left out")
+check([d["id"] for d in home if d["light"]] == ["light.ceiling", "switch.reading_lamp", "switch.plug_1",
+                                                 "switch.strip", "switch.tv_lights"], "lamps on plugs count as lights")
+check(byid["lock.car_door"]["car"] and not byid["climate.hall"]["car"], "the car's devices")
+for cmd, action, want in (
+        ("turn off the den lights", "off", ["light.ceiling", "switch.reading_lamp", "switch.plug_1", "switch.tv_lights"]),
+        ("Turn on the family room lights please", "on", ["light.ceiling", "switch.reading_lamp", "switch.plug_1",
+                                                          "switch.tv_lights"]),
+        ("which lights are on?", "status", ["light.ceiling", "switch.reading_lamp", "switch.plug_1", "switch.strip",
+                                            "switch.tv_lights"]),
+        ("turn on the reading lamp", "on", ["switch.reading_lamp"]), ("turn off the TV", "off", ["media_player.tv"]),
+        ("is the car locked?", "status", ["lock.car_door"]), ("lock the car", "lock", ["lock.car_door"]),
+        ("set the thermostat to 72", "temperature", ["climate.hall"]), ("start the vacuum", "on", ["vacuum.robo"]),
+        ("dim the ceiling light to 20%", "brightness", ["light.ceiling"]),
+        ("what's the weather like", "status", []), ("turn on the jacuzzi", "on", [])):
+    p = hamod.parse(cmd)
+    got = [d["id"] for d in hamod.resolve(home, p)[0]]
+    check(p["action"] == action and got == want, f"ha {cmd!r} -> {action} {want} (got {p['action']} {got})")
+called = []
+hamod.call_service = lambda b, t, dom, svc, data: called.append((dom, svc, data))
+hamod._cache.update(t=time.time(), devices=home)
+r = hamod.handle("turn off the den lights", "", "")
+check(called == [("light", "turn_off", {"entity_id": ["light.ceiling"]}),
+                 ("switch", "turn_off", {"entity_id": ["switch.plug_1"]})]
+      and r[1]["say"] == "Okay, turned off the Ceiling Light and Corner.", f"only what's on/off changes? {called} {r}")
+called.clear()
+hamod._cache.update(t=time.time(), devices=home)
+r = hamod.handle("which lights are on in the bedroom", "", "")
+check(not called and r[1]["say"] == "None of the lights in the Bedroom are on. Bed Strip is offline.",
+      f"status question changes nothing: {r}")
+r = hamod.handle("dim the den lights to 40 percent", "", "")
+check(called == [("light", "turn_on", {"brightness_pct": 40, "entity_id": ["light.ceiling"]})]
+      and "can't be dimmed" in r[1]["say"], f"dimming plugs: {r}")
+eb = Toolbox(specs=tools.SPECS)  # ending the conversation only when the user said goodbye
+for said, ok in (("okay thanks, bye", True), ("that's all for now", True), ("end the conversation", True),
+                 ("goodnight ming", True), ("what's the weather tomorrow", False), ("stop", False)):
+    eb.new_turn(lambda s=said: s)
+    r = eb.run("end_conversation", {})
+    check(bool(r[1].get("end")) == ok, f"end_conversation for {said!r}: {r}")
+for say, want in (("Okay, turned off the lamp.", "Very good, sir. I've turned off the lamp."),  # the butler's words
+                  ("The lamp is on. The fan is off.", "The lamp is on, sir. The fan is off."),
+                  ("Goodbye, sir.", "Goodbye, sir.")):
+    check(tools.in_character(say, "jarvis") == want and tools.in_character(say, "") == say,
+          f"jarvis: {say!r} -> {tools.in_character(say, 'jarvis')!r}")
 started = []  # Hermes only when the user says its name
 tools._hermes = lambda method, path, body=None, timeout=10.0: (started.append(body) or {"run_id": "r1"}) \
     if method == "POST" and path == "/v1/runs" else {"status": "completed", "output": "ok"}

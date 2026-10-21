@@ -280,6 +280,7 @@
           <option value="concise">Concise expert</option>
           <option value="tutor">Language tutor</option>
           <option value="story">Storyteller</option>
+          <option value="jarvis">Jarvis (robot butler)</option>
           <option value="custom">Custom</option>
         </select>
       </div>
@@ -304,7 +305,24 @@ const PRESETS = {
   concise: "You are Ming, a precise expert voice assistant. Answer the user's spoken question directly in one or two short sentences, with no filler or preamble. Use plain spoken language only: no markdown, lists, or code.",
   tutor: "You are Ming, a patient language tutor in a spoken conversation. Reply in the language the user is practicing, keep sentences simple, gently correct mistakes by repeating the corrected sentence, then ask a short follow-up question. Use plain spoken language only.",
   story: "You are Ming, a warm, expressive storyteller in a spoken conversation. Tell vivid but short stories and stop at natural pauses so the listener can react. Use plain spoken language only: no markdown or lists.",
+  jarvis: "You are Jarvis, the user's devoted AI butler, speaking in a live voice conversation. You are an impeccably polite English gentleman's gentleman: calm, unflappable, quietly brilliant, with a dry, understated British wit. Address the user as sir. Keep replies brief, one or two sentences, and open them in varied butler fashion: 'Certainly, sir.', 'Right away, sir.', 'Of course.', 'I've taken the liberty of...', 'Might I suggest...', 'Very good, sir.'. When the user is about to do something unwise, say so with gentle, deadpan irony, then help anyway. Take quiet pride in running the house: the lights, the car, the timers and the shopping list are your domain. Never grovel and never gush; a raised eyebrow is worth more than an exclamation mark. Use plain spoken language only: no markdown, lists, emojis, or code.",
 };
+const PERSONA = { jarvis: { voice: ['Jarvis', 'UK_George'], wake: 'Jarvis' } };  // a preset's own voice and wake word
+function applyPersona(p, prev) {  // switching to a persona saves your voice and wake word; switching away restores them
+  if (PERSONA[prev] && !PERSONA[p]) {
+    const saved = store.get('prePersona', null);
+    if (saved) { if ([...$('voice').options].some((o) => o.value === saved.voice)) $('voice').value = saved.voice; $('wakeWord').value = saved.wake; }
+  }
+  if (PERSONA[p]) {
+    if (!PERSONA[prev]) store.set('prePersona', { voice: $('voice').value, wake: wakeName() });
+    const v = PERSONA[p].voice.find((x) => [...$('voice').options].some((o) => o.value === x));
+    if (v) $('voice').value = v;
+    $('wakeWord').value = PERSONA[p].wake;
+  }
+  store.set('voice', $('voice').value); store.set('wakeWord', wakeName());
+  $('cloneDel').disabled = builtinVoices.includes($('voice').value);
+  sendCfg(); restState();
+}
 
 // ---------------------------------------------------------------- state
 let ws = null, ctx = null, micStream = null, micSrc = null, capNode = null, outGain = null, outAnalyser = null;
@@ -385,12 +403,12 @@ function chime(notes, gap = 0.13, vol = 0.18) {  // short sine tones: woken up (
 $('modeSeg').addEventListener('click', (e) => { if (e.target.dataset.mode) setMode(e.target.dataset.mode); });
 function sendCfg() {
   if (!ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({ type: 'config', voice: $('voice').value, barge_in: $('barge').checked, echo_guard: $('echo').checked, smart_turn: $('smart').checked, tools: $('tools').checked, home: $('home').value.trim(), mode, wake_word: wakeName(),
+  ws.send(JSON.stringify({ type: 'config', voice: $('voice').value, barge_in: $('barge').checked, echo_guard: $('echo').checked, smart_turn: $('smart').checked, tools: $('tools').checked, home: $('home').value.trim(), mode, wake_word: wakeName(), persona: PERSONA[$('preset').value] ? $('preset').value : '',
     end_ms: +$('end').value, short_extra_ms: +$('short').value, spec_ms: +$('spec').value, resume_ms: +$('resume').value, threshold: +$('th').value }));
 }
 $('preset').value = store.get('preset', 'assistant');
 $('sys').value = PRESETS[$('preset').value] || store.get('sys', PRESETS.assistant);  // (a preset: always its current text)
-$('preset').addEventListener('change', () => { const p = $('preset').value; store.set('preset', p); if (PRESETS[p]) { $('sys').value = PRESETS[p]; store.set('sys', $('sys').value); } });
+$('preset').addEventListener('change', () => { const p = $('preset').value, prev = store.get('preset', 'assistant'); store.set('preset', p); if (PRESETS[p]) { $('sys').value = PRESETS[p]; store.set('sys', $('sys').value); } applyPersona(p, prev); if (PERSONA[p] || PERSONA[prev]) newChat(true); });  // (a persona takes effect at once)
 $('sys').addEventListener('input', () => { store.set('sys', $('sys').value); $('preset').value = 'custom'; store.set('preset', 'custom'); });
 $('applySys').onclick = () => newChat(true);
 
@@ -630,7 +648,7 @@ function addMsg(cls, text) {
   const m = document.createElement('div'); m.className = 'meta'; d.appendChild(m);
   $('log').appendChild(d); scrollLog(); return d;
 }
-const TOOL_ICON = { web_search: '🔎', get_weather: '🌤', calculate: '🧮', get_current_time: '🕒', home_assistant: '🏠', jellyfin: '🎬', ask_hermes: '🤖', hermes_result: '🤖', timer: '⏲', timer_done: '⏰', announcement: '📣', lists: '📝', memory: '🧠' };
+const TOOL_ICON = { web_search: '🔎', get_weather: '🌤', calculate: '🧮', get_current_time: '🕒', home_assistant: '🏠', jellyfin: '🎬', ask_hermes: '🤖', hermes_result: '🤖', timer: '⏲', timer_done: '⏰', announcement: '📣', lists: '📝', memory: '🧠', end_conversation: '👋' };
 function showTool(msgEl, m) {  // a tool call shown above the reply: what it looked up, and the sources
   let box = msgEl.querySelector('.tools');
   if (!box) { box = document.createElement('div'); box.className = 'tools'; msgEl.prepend(box); }
@@ -644,7 +662,7 @@ function showTool(msgEl, m) {  // a tool call shown above the reply: what it loo
                  calculate: ['Calculating', 'Calculated'], get_current_time: ['Checking the time', 'Checked the time'],
                  home_assistant: ['Home Assistant', 'Home Assistant'], ask_hermes: ['Asking Hermes', 'Passed to Hermes'], jellyfin: ['Jellyfin', 'Jellyfin'],
                  hermes_result: ['Hermes finished', 'Hermes finished'], timer: ['Timer', 'Timer'], timer_done: ['Time’s up', 'Time’s up'], announcement: ['Announcement', 'Announcement'],
-                 lists: ['Updating your list', 'List'], memory: ['Memory', 'Memory'] }[m.name] || [m.name, m.name];
+                 lists: ['Updating your list', 'List'], memory: ['Memory', 'Memory'], end_conversation: ['Ending the conversation', 'Conversation ended'] }[m.name] || [m.name, m.name];
   row.textContent = `${TOOL_ICON[m.name] || '🛠'} ${verb[m.status === 'done' ? 1 : 0]}${what ? ': ' + what : ''}${m.status === 'done' ? '' : '…'}`;
   if (m.status === 'done' && m.error) row.textContent += ' (failed)';
   if (m.status === 'done' && (m.sources || []).length) {
@@ -735,6 +753,9 @@ function connect() {
         break;
       case 'alarm': chime([880, 660, 880, 660, 880, 660], 0.16, 0.25); break;  // a timer or reminder went off
       case 'chime': chime([988, 784], 0.22, 0.2); break;  // an announcement (Home Assistant, a script)
+      case 'end':  // the user said goodbye: end the conversation once it has played (wake-word mode: the server just goes back to sleep)
+        if (mode !== 'wake' && running) { const t = setInterval(() => { if (!sources.length) { clearInterval(t); if (running) $('start').click(); } }, 150); }
+        break;
       case 'interrupt':
         stopPlayback(); finishBot(true); restState(); break;
       case 'retract': {  // you kept talking right after it started answering: that reply is withdrawn and

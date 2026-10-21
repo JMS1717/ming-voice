@@ -175,6 +175,7 @@ GPU_TURN = threading.Lock()  # one reply generating at a time
 TURN_POOL = ThreadPoolExecutor(1)  # Smart Turn runs off the event loop (~20 ms on the CPU)
 WAKE_POOL = ThreadPoolExecutor(1)  # wake-word checks (a short transcription, ~0.2 s on the GPU)
 WAKE_CHECK_S = 1.6  # how much of an utterance's start is checked for the wake word
+WAKE_ALIKE = {"jarvis": {"jarvis's", "javis", "jervis", "jarvi", "jarves", "travis", "garvis"}}  # ASR mishearings
 
 
 def find_wake_word(text: str, word: str) -> tuple[bool, str]:
@@ -182,7 +183,7 @@ def find_wake_word(text: str, word: str) -> tuple[bool, str]:
     words after it). ASR sometimes writes a lone "Hey Ming" in Chinese (嘿，明)."""
     toks = re.findall(r"[a-z0-9']+|[一-鿿]", text.lower())
     name = (word.lower().split() or ["ming"])[-1]
-    names = {name, name + "'s"} | ({"明", "铭"} if name == "ming" else set())
+    names = {name, name + "'s"} | ({"明", "铭"} if name == "ming" else set()) | WAKE_ALIKE.get(name, set())
     for i, t in enumerate(toks[:4]):
         if t in names:
             return True, " ".join(toks[i + 1:])
@@ -202,6 +203,7 @@ def _load():
     import gc
     gc.collect()
     ENGINE["talker"] = Talker(use_graphs=os.environ.get("MING_GRAPHS", "1") == "1")
+    VOICES.extend(v for v in ENGINE["talker"].designed_voices if v not in VOICES)  # (e.g. Jarvis: dev/design_voice.py)
     ENGINE["vad_proto"] = load_silero_vad
     ENGINE["turn"] = None
     if os.environ.get("MING_SMART_TURN", "1") == "1":
@@ -516,6 +518,7 @@ class Reply:
         self.snap = None  # conversation state before this turn (for undo)
         self.undone = False  # retracted: the user kept talking right after it started answering
         self.finished = False
+        self.end = False  # it ends the conversation (end_conversation)
         if not speculative:
             self.decided.set()
         self.worker = threading.Thread(target=sess._run_reply, args=(self,), daemon=True)
@@ -573,6 +576,7 @@ class Session:
         self.barge_in = True
         self.tools = True  # let the model search the web, check the weather, calculate, tell the time
         self.home = ""  # the user's location, for "what's the weather?"
+        self.persona = ""  # "jarvis": tool confirmations in the butler's words ("Certainly, sir. I've turned off...")
         self.end_ms = 500
         self.spec_ms = 32  # start generating speculatively after this much of a pause (0 = off)
         self.short_extra_ms = 250  # extra end-of-turn wait when the utterance is under 1 s of speech
@@ -1011,7 +1015,7 @@ class Session:
                 th.restore(pending)
             if r.cancel.is_set():
                 return
-            TOOLBOX.home = self.home
+            TOOLBOX.home, TOOLBOX.persona = self.home, self.persona
             th.set_tools(TOOLBOX if self.tools else None)  # (rebuilds the context when this changed)
             snap = r.snap = th.snapshot()
             try:
@@ -1088,6 +1092,8 @@ class Session:
             confirmed = lambda: r.decided.wait(30) and r.committed and not cancel.is_set()  # noqa: E731
             for delta in th.stream(r.audio, cancel=cancel, user_text=r.user_text, events=True, gate=confirmed):
                 if isinstance(delta, dict):  # a tool call / its result
+                    if delta.get("end"):  # the user said goodbye: end the conversation after this reply
+                        r.end = True
                     if delta["type"] == "tool_call":
                         for piece in fr.flush():  # speak what it said before calling the tool
                             frag_q.put(piece)
@@ -1135,6 +1141,15 @@ class Session:
         log(f"turn: {text!r} | {ms}{' (interrupted)' if cancel.is_set() else ''}")
         r.emit("json", {"type": "done", "text": text, "metrics": ms, "interrupted": cancel.is_set()})
         self.loop.call_soon_threadsafe(self._replied)
+        if r.end and not cancel.is_set():
+            r.emit("json", {"type": "end"})  # (the browser stops listening once the goodbye has played)
+            self.loop.call_soon_threadsafe(self._end_conversation)
+
+    def _end_conversation(self):
+        """Wake-word mode: back to waiting for the wake word as soon as the goodbye has played (no follow-up)."""
+        if self.mode == "wake":
+            self.awake_until = self.play_until
+            self.loop.call_later(max(0.0, self.play_until - time.time()) + 0.3, self._maybe_sleep)
 
     # -- control --
     def on_control(self, msg: dict):
@@ -1160,6 +1175,8 @@ class Session:
                 self.tools = bool(msg["tools"])
             if "home" in msg:
                 self.home = str(msg["home"] or "").strip()[:100]
+            if "persona" in msg:
+                self.persona = str(msg["persona"] or "")[:40]
             if "fast_end_ms" in msg:
                 self.fast_end_ms = int(max(100, min(1000, msg["fast_end_ms"])))
             if "threshold" in msg:

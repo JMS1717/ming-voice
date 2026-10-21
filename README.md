@@ -38,6 +38,8 @@ Brave Search, and Open-Meteo); turn tools off in Settings to stay fully offline.
 - **Shopping and to-do lists**, and **remembering things you tell it** ("I parked on level 3")
 - **Home Assistant** (lights, plugs, thermostat, locks, media), **Jellyfin**, and hand-off to a **Hermes Agent** for bigger jobs
 - Risky actions (unlocking, opening the garage) are **confirmed first**
+- **Jarvis mode**: a dry-witted British robot butler ("Certainly, sir.") with its own designed voice and wake word
+- Say **"that's all, bye"** and it ends the conversation (in wake-word mode it goes back to sleep)
 
 **Made to be lived with**
 - Runs **always on** with the PC's own mic and speakers, no browser tab needed
@@ -139,6 +141,12 @@ Press **Start conversation**, allow the microphone, and talk. Pause when you're 
   the chime. For 8 s after each reply you can follow up without the name. Any name works; "Ming" is recognised best.
 - **Clone a voice** in the sidebar: record or upload 5–15 s of one person speaking. Voices are saved in `voices/`.
 - **Type** instead of talking in the box at the bottom; the answer is still spoken.
+- **Jarvis mode**: pick **Jarvis (robot butler)** under Settings → Persona. It switches to the Jarvis voice and the
+  wake word "Jarvis" (your own come back when you pick another preset), and even the tool confirmations are in
+  character ("Very good, sir. I've turned off the lamp."). The voice is an original one made with the Talker's voice
+  design (`dev/design_voice.py`), not a copy of anyone's.
+- **End the conversation** by saying goodbye ("that's all, thanks", "goodnight", "end the conversation"): it says
+  goodbye and stops listening, or goes back to sleep in wake-word mode.
 
 ### Always on, without a browser
 
@@ -190,7 +198,7 @@ used and its sources.
 | `timer` | "Set a timer for 10 minutes", "remind me to call mom at 5 pm", "how long is left?", "cancel the pasta timer". When one goes off it chimes and says so, again every minute (twice more) until you answer. Kept in `.timers.json`, so they survive a restart | – |
 | `lists` | "Add milk and eggs to my shopping list", "what's on my to-do list?", "I bought the eggs", "clear my shopping list". Shopping, to-do, or any list you name, kept in `.lists.json` | – |
 | `memory` | "Remember that I parked on level 3", "forget where I parked". Up to 40 facts in `.memory.json`, given to the model in every conversation, so "where did I park?" works days later | – |
-| `home_assistant` | "Turn off the kitchen lights", "is the car locked?" Passed to Home Assistant's own Assist, so names, aliases and areas work as in HA, and **only entities exposed to voice assistants** can be touched | `.ha_token` (HA → your profile → Security → long-lived token), `.ha_url` or `MING_HA_URL` (default `http://homeassistant.local:8123`) |
+| `home_assistant` | "Turn off the kitchen lights", "is the car locked?" "Which lights are on?", "turn off the living room lights". Ming reads HA's device, area and entity registries itself, so it sees **every** light, plug, lock, thermostat, fan, vacuum and speaker the token can (lamps on smart plugs count as lights; config and hidden entities are skipped), and the model is told your device names by room. Anything else goes to HA's own Assist. `MING_HA_DIRECT=0`: Assist only, so **only entities exposed to voice assistants** can be touched | `.ha_token` (HA → your profile → Security → long-lived token), `.ha_url` or `MING_HA_URL` (default `http://homeassistant.local:8123`) |
 | `jellyfin` | "Play The Office on the TV", "pause", "what's playing?", "do I have Dune?" Searches your library and controls open Jellyfin players; a series continues from the next unwatched episode | `.jellyfin.json`: `{"url": "http://<host>:8096", "key": "<API key>"}` |
 | `ask_hermes` | "Ask Hermes to …" hands a bigger job to a [Hermes Agent](https://github.com/NousResearch/hermes-agent) in the background; the answer is announced when it's ready. Only when you say "Hermes" (`MING_HERMES_AUTO=1` lets Ming hand it anything its own tools can't do) | `.hermes.json`: `{"url": "http://<host>:8642", "key": "<API_SERVER_KEY>"}` |
 
@@ -306,6 +314,7 @@ conversation.
 | `MING_ECHO_DEBUG` | unset | Log what the echo guard measured whenever a barge-in fires |
 | `MING_TRACEMALLOC` | `0` | Python allocation tracing for `/api/debug/mem` |
 | `MING_CONFIRM_RISKY` | `1` | Ask before unlocking, opening the garage or gate, or disarming an alarm |
+| `MING_HA_DIRECT` | `1` | Home Assistant: control every device the token can see (`0` = only through Assist, i.e. entities exposed to voice assistants) |
 | `MING_HA_EVENTS` | `1` | Say Home Assistant `ming_announce` events (needs `.ha_token`) |
 | `MING_HERMES_AUTO` | `0` | `1`: hand Hermes anything Ming's own tools can't do, not only what you ask Hermes for by name |
 | `MING_SUPERVISE` | `0` | `1`: restart the server when it crashes (the Windows launcher sets it) |
@@ -324,6 +333,7 @@ browser (static/index.html) ⇄ WebSocket: 16 kHz PCM in / 44.1 kHz PCM out ⇄ 
               · push-to-talk · voice cloning · background transcription
   api.py      OpenAI-compatible /v1 API (speech, transcriptions, chat with audio in/out)
   tools.py    web search, weather, timers, lists, memory, Home Assistant, Jellyfin, Hermes
+  ha.py       Home Assistant device list (registries over the websocket API), command parsing and control
   lan.py      access key + cookie login for the LAN port; windows/lan_proxy.py terminates HTTPS on Windows
   engine.py   Thinker: Ming audio LLM (hybrid Kimi-delta-attention / MLA, 128-expert MoE)
                 - static-state cache, one HIP graph per attention-length bucket (8.7 ms/token)
