@@ -1,4 +1,4 @@
-# torch 2.8.0 / torchaudio / torchvision / triton 3.4.0 come from the ROCm 7.2.4 wheels in setup_env.sh.
+# torch 2.11.0 / torchaudio / torchvision / triton come from setup_env.sh (CUDA 12.8, ROCm 7.2, or ROCm 7.2.4 in WSL).
 # Versions below are the ones this project was validated with.
 transformers==5.14.1
 huggingface-hub[hf_xet]==1.33.0
@@ -23,3 +23,5 @@ segno==1.6.6
 silero-vad==6.2.3
 websockets==17.3
 ddgs==9.16.0
+# Linux always-on client (linux/ming-voice --always-on); needs the system PortAudio library
+sounddevice==0.5.6

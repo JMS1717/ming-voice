@@ -41,3 +41,6 @@ windows/ming_client.log
 windows/.ming_client.pid
 .wsl_restart_needed
 anchors/*.wav
+.gpu_env
+.server.pid
+.lan_proxy.pid

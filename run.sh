@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 cd "$(dirname "$0")"
-export HSA_ENABLE_DXG_DETECTION=1
+[ -e /dev/dxg ] && export HSA_ENABLE_DXG_DETECTION=1  # WSL
+# Per-machine GPU settings written by install.sh (which GPU to use, GFX version override)
+[ -f .gpu_env ] && . ./.gpu_env
 export TRITON_CACHE_AUTOTUNING=1
 # Every reply runs on fresh threads; with glibc's default per-thread malloc arenas, freed audio/tensor buffers
 # fragment across dozens of arenas and resident memory grows ~50 MB per conversation. Two arenas: ~1 MB.

@@ -260,8 +260,9 @@ def _load():
     _warmup()
     load_conversation(ENGINE["thinker"])
     # Start only after all graph captures (it must not launch kernels while a capture is running).
-    # Without it, the first request after ~20 s of GPU idle stalls for minutes under WSL.
-    GpuKeepAwake().start()
+    # Without it, the first request after ~20 s of GPU idle stalls for minutes under WSL (not needed on native Linux).
+    if os.environ.get("MING_GPU_KEEPAWAKE", "1" if os.path.exists("/dev/dxg") else "0") == "1":
+        GpuKeepAwake().start()
     torch.cuda.empty_cache()
     free, total = torch.cuda.mem_get_info()
     log(f"GPU memory: {torch.cuda.memory_allocated() / 2**30:.2f} GiB allocated, "

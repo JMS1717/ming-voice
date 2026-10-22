@@ -2,12 +2,12 @@
 
 # Ming Voice
 
-**A fully local, real-time voice assistant for AMD Radeon GPUs (NVIDIA experimental).**<br>
+**A fully local, real-time voice assistant for AMD Radeon GPUs (NVIDIA experimental), on Linux or Windows.**<br>
 Talk to it and it answers out loud, usually starting **about a quarter of a second** after you stop talking.
 
 [![Release](https://img.shields.io/github/v/release/JMS1717/ming-voice?color=7f9cff)](https://github.com/JMS1717/ming-voice/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-34d399)](LICENSE)
-![ROCm on WSL2](https://img.shields.io/badge/ROCm%207.2-WSL2-ed1c24?logo=amd&logoColor=white)
+![ROCm 7.2](https://img.shields.io/badge/ROCm%207.2-Linux%20%7C%20WSL2-ed1c24?logo=amd&logoColor=white)
 [![Donate with PayPal](https://img.shields.io/badge/Donate-PayPal-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/paypalme/jasonselsley)
 
 <img src="docs/screenshots/desktop.png" alt="Ming Voice in the browser: a listening orb above a conversation that checks the weather in Lisbon, adds items to a shopping list and remembers where the spare key is" width="100%">
@@ -86,20 +86,33 @@ Measured on a Radeon RX 7900 XTX (24 GB):
 
 ### Requirements
 
-- Windows 11 with **WSL2** and **Ubuntu 24.04**
+- **Linux** (x86_64): Arch, CachyOS, EndeavourOS, Manjaro, Ubuntu, Debian, Pop!_OS, Mint, Fedora, Nobara or
+  openSUSE (others work too if they have git and curl), **or Windows 11** with WSL2 (the installer sets it up)
 - A GPU with **16 GB+ VRAM**:
-  - **AMD** supported by ROCm on WSL (tested on the RX 7900 XTX), with a recent Adrenalin driver with WSL support
-  - **NVIDIA** RTX 30 series or newer (e.g. RTX 3090, 4060 Ti 16 GB, 4080, 4090, 5080, 5090), with a current Game
-    Ready or Studio driver. *Experimental:* the installer sets it up with CUDA PyTorch and the code is
-    vendor-neutral, but it hasn't been tested on NVIDIA hardware yet. Reports welcome!
+  - **AMD** Radeon RX 6800 or newer: RX 7000 / 9000 series and Radeon PRO cards (tested on the RX 7900 XTX).
+    On Linux it only needs the standard `amdgpu` driver that comes with your kernel: PyTorch brings its own ROCm 7.2,
+    so there's no ROCm to install. On Windows: a recent Adrenalin driver with WSL support.
+  - **NVIDIA** RTX 30 series or newer (e.g. RTX 3090, 4060 Ti 16 GB, 4080, 4090, 5080, 5090), with a current
+    driver (on Linux: your distro's NVIDIA driver, e.g. `nvidia-open` on Arch/CachyOS). *Experimental:* the
+    installer sets it up with CUDA PyTorch and the code is vendor-neutral, but it hasn't been tested on a 16 GB
+    NVIDIA card yet. Reports welcome!
 - ~30 GB free disk (20 GB model + Python environment)
-
-Native Linux is untested, but should only need the WSL-specific parts removed
-(`HSA_ENABLE_DXG_DETECTION`, the `libhsa-runtime64` removal in `setup_env.sh`, `scripts/install_rocm_wsl.sh`).
 
 ### Install
 
-Open **PowerShell** on Windows and paste:
+**Linux:** open a terminal and paste:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JMS1717/ming-voice/main/install.sh | bash
+```
+
+It installs what's missing (git, curl, openssl, PortAudio) with your package manager, finds your GPU, sets up
+Python and PyTorch for it (ROCm 7.2 or CUDA 12.8, nothing system-wide), downloads the model (~20 GB) into
+`~/ming-voice`, and adds **Ming Voice** to your app menu. It may ask for your password (for the packages, and on
+AMD to add you to the `render` group that may use the GPU; log out and back in once after that). If anything
+stops halfway, run it again: finished steps are skipped. Set `MING_DIR` to install somewhere else.
+
+**Windows:** open **PowerShell** and paste:
 
 ```powershell
 irm https://raw.githubusercontent.com/JMS1717/ming-voice/main/install.ps1 | iex
@@ -133,11 +146,15 @@ bash setup_env.sh                          # Python env (ROCm or CUDA PyTorch, n
   `\\wsl.localhost\Ubuntu-24.04\home\<you>\ming-voice`). It starts the server, waits for the model, and opens
   <http://localhost:8000>.
 - **WSL shell:** `./run.sh`, then open <http://localhost:8000>.
+- **Linux:** **Ming Voice** in your app menu, or `ming-voice` in a terminal. It starts the server in the
+  background, waits for the model, and opens <http://localhost:8000>. `ming-voice --stop` stops it (it holds
+  ~20 GB of VRAM), `ming-voice --status` and `ming-voice --logs` show what it's doing, `ming-voice --help` lists
+  the rest. (Or run `./run.sh` in the folder, in the foreground.)
 
 Press **Start conversation**, allow the microphone, and talk. Pause when you're done.
 
-> Keep the server window open while you use it: WSL shuts its VM down when nothing is attached. Close it when
-> you're done, since it holds ~20 GB of VRAM.
+> Windows: keep the server window open while you use it: WSL shuts its VM down when nothing is attached. Close it
+> when you're done, since it holds ~20 GB of VRAM.
 
 ## Using it
 
@@ -160,6 +177,11 @@ Press **Start conversation**, allow the microphone, and talk. Pause when you're 
 `windows\Ming Voice (always on).cmd` starts the server (minimized), phone access, and `windows\ming_client.py`,
 a background client that uses the PC's own microphone and speakers. Just say "Hey Ming, …" any time. Timer alarms
 and announcements play through the speakers too.
+
+**On Linux:** `ming-voice --always-on` (or *Always on* in the app menu entry's right-click menu) does the same, with
+the same client and settings. `ming-voice --autostart --always-on` starts it when you log in (add `--phone` for
+phone access too; `--no-autostart` undoes it), and `ming-voice --stop` stops it. The notes below apply to both,
+with the paths on Linux being `.venv/bin/python windows/ming_client.py` and `ming_client.log`.
 
 - **Start at sign-in:** run `powershell -ExecutionPolicy Bypass -File windows\install_autostart.ps1` once
   (`-Remove` undoes it; `-Browser` autostarts the browser app instead).
@@ -189,6 +211,9 @@ server), press **Phone** in the app on the PC, and scan the QR code. The phone o
   file and restart to change it.
 - WSL2 isn't reachable from the network by itself, which is why the proxy runs on Windows (standard library
   only). If Windows Firewall asks, allow Python on private networks.
+- **Linux:** `ming-voice --phone` starts the same proxy next to the server. With a firewall on (Fedora and
+  openSUSE have one by default), allow port 8443/tcp: `sudo firewall-cmd --add-port=8443/tcp --permanent && sudo
+  firewall-cmd --reload` (ufw: `sudo ufw allow 8443/tcp`).
 - Add the page to your home screen to use it like an app; the screen stays on during a conversation.
 
 ## Tools
@@ -366,15 +391,19 @@ per-token step, and hiding model latency inside the end-of-turn pause.
 
 ## Troubleshooting
 
-- **`No HIP GPUs are available`**: `HSA_ENABLE_DXG_DETECTION=1` must be set (`run.sh` does it).
+- **`No HIP GPUs are available`**: in WSL, `HSA_ENABLE_DXG_DETECTION=1` must be set (`run.sh` does it). On Linux,
+  your user must be in the `render` group (`groups` shows it; the installer adds you, then log out and back in).
+- **Linux, AMD GPU not listed by PyTorch** (e.g. an RX 6700 XT or 7600): the installer writes the closest supported
+  GPU to `.gpu_env` (`HSA_OVERRIDE_GFX_VERSION`); edit or delete that file to change it. With an integrated GPU too,
+  `.gpu_env` also picks the big one (`ROCR_VISIBLE_DEVICES`).
 - **The first request after idle takes minutes**: under WSL, an AMD GPU that drives no display stops serving WSL
   work promptly when idle. The server runs a tiny keep-alive kernel a few times per second.
 - **Slow loading or swapping**: the loader streams weights straight to the GPU; Hugging Face's loader peaks at
   ~15 GB of host RAM, more than WSL allows by default.
 - **It cuts you off**: raise the end-of-turn pause in Settings.
-- **The always-on client never hears you**: run `python windows\ming_client.py --test-mics` and set
-  `input_device` in `.client.json`.
-- Logs are in `server.log`; health is at <http://localhost:8000/api/health>.
+- **The always-on client never hears you**: run `python windows\ming_client.py --test-mics` (Linux:
+  `.venv/bin/python windows/ming_client.py --test-mics`) and set `input_device` in `.client.json`.
+- Logs are in `server.log` (Linux: `ming-voice --logs`); health is at <http://localhost:8000/api/health>.
 
 ## Development
 

@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# Ming Voice launcher for Linux: starts the server in the background (it keeps running after this exits),
+# waits until the model is loaded, then opens the app in your browser.
+#
+#   ming-voice                 start (if needed) and open http://localhost:8000
+#   ming-voice --always-on     no browser: say "Hey Ming, ..." to this PC's mic any time
+#   ming-voice --phone         also start phone access (https on port 8443; press Phone in the app for the QR code)
+#   ming-voice --no-browser    just start the server
+#   ming-voice --stop          stop everything (server, phone access, always-on client)
+#   ming-voice --status        what's running
+#   ming-voice --logs          follow the server log
+#   ming-voice --autostart [--always-on] [--phone]   start at login with those options; --no-autostart undoes it
+#   ming-voice --install-shortcuts                   app-menu entry + `ming-voice` command (install.sh does this)
+#   ming-voice --uninstall-shortcuts
+# Settings: MING_PORT (default 8000).
+set -uo pipefail
+DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
+PORT=${MING_PORT:-8000}
+URL="http://localhost:$PORT"
+HEALTH="http://127.0.0.1:$PORT/api/health"
+PY="$DIR/.venv/bin/python"
+SERVER_PID="$DIR/.server.pid"
+PROXY_PID="$DIR/.lan_proxy.pid"
+APPS=${XDG_DATA_HOME:-$HOME/.local/share}/applications
+ICONS=${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps
+AUTOSTART=${XDG_CONFIG_HOME:-$HOME/.config}/autostart/ming-voice.desktop
+
+say() { echo "$*"; [ -t 1 ] || notify "$*"; }
+notify() { command -v notify-send >/dev/null && notify-send -a "Ming Voice" -i ming-voice "Ming Voice" "$*" 2>/dev/null || true; }
+health() { curl -fsS --max-time 2 "$HEALTH" 2>/dev/null; }
+ready() { [[ $1 =~ \"ready\":[[:space:]]*true ]]; }
+alive() { [ -f "$1" ] && kill -0 -- "-$(cat "$1")" 2>/dev/null; }
+
+start_server() {
+  [ -x "$PY" ] || { say "Ming Voice isn't installed yet: run install.sh in $DIR"; exit 1; }
+  if health >/dev/null || alive "$SERVER_PID"; then return; fi
+  # Own session, so it survives this terminal; MING_SUPERVISE restarts it after a crash.
+  setsid bash -c "cd '$DIR' && PORT=$PORT MING_SUPERVISE=1 exec ./run.sh 2>&1 | grep --line-buffered -vE 'Warning|warn\(|bos_token|eos_token|scaled_dot|theta is None' > server.log" \
+    </dev/null >/dev/null 2>&1 &
+  echo $! >"$SERVER_PID"
+}
+
+wait_ready() {
+  local t0=$SECONDS h
+  h=$(health) && ready "$h" && return
+  say "Starting Ming Voice: loading the model onto the GPU (the first start compiles kernels and takes a few minutes)..."
+  while :; do
+    h=$(health) && ready "$h" && break
+    if ! alive "$SERVER_PID" && [ -z "$h" ]; then
+      echo; tail -20 "$DIR/server.log" 2>/dev/null
+      say "The server stopped while starting. Full log: $DIR/server.log"
+      exit 1
+    fi
+    [ $((SECONDS - t0)) -lt 900 ] || { echo; say "The server did not become ready. Log: $DIR/server.log"; exit 1; }
+    [ -t 1 ] && printf '\r  waiting... %d s ' $((SECONDS - t0))
+    sleep 3
+  done
+  [ -t 1 ] && echo
+}
+
+start_phone() {
+  alive "$PROXY_PID" && return
+  command -v openssl >/dev/null || { say "Phone access needs openssl (install it with your package manager)."; return; }
+  setsid "$PY" "$DIR/windows/lan_proxy.py" </dev/null >"$DIR/lan_proxy.log" 2>&1 &
+  echo $! >"$PROXY_PID"
+  say "Phone access: https on port ${MING_PHONE_PORT:-8443}. Press Phone in the app for the QR code (allow that port in your firewall if it has one)."
+}
+
+start_client() {
+  "$PY" -c 'import sounddevice' 2>/dev/null ||
+    { say "The always-on mode needs PortAudio (package portaudio, or libportaudio2 on Debian/Ubuntu/openSUSE)."; return 1; }
+  setsid "$PY" "$DIR/windows/ming_client.py" --log "$DIR/ming_client.log" </dev/null >/dev/null 2>&1 &
+  say "Always on: say \"Hey Ming, ...\" (log: $DIR/ming_client.log)."
+}
+
+stop_group() {  # <pid file> <name>
+  alive "$1" || { rm -f "$1"; return; }
+  local g; g=$(cat "$1")
+  kill -INT -- "-$g" 2>/dev/null
+  for _ in $(seq 30); do kill -0 -- "-$g" 2>/dev/null || break; sleep 1; done
+  kill -TERM -- "-$g" 2>/dev/null && sleep 2
+  kill -KILL -- "-$g" 2>/dev/null
+  rm -f "$1"
+  echo "Stopped $2."
+}
+
+desktop_entry() {  # <Exec args> [autostart]
+  cat <<EOF
+[Desktop Entry]
+Type=Application
+Name=Ming Voice
+GenericName=Voice assistant
+Comment=Talk with Ming, a local voice assistant on your GPU
+Exec="$DIR/linux/ming-voice" $1
+Icon=ming-voice
+Terminal=false
+Categories=Utility;AudioVideo;
+Keywords=voice;assistant;speech;AI;
+EOF
+  [ -n "${2:-}" ] && { echo "X-GNOME-Autostart-enabled=true"; return; }
+  cat <<EOF
+Actions=always-on;phone;stop;
+
+[Desktop Action always-on]
+Name=Always on (wake word, no browser)
+Exec="$DIR/linux/ming-voice" --always-on
+
+[Desktop Action phone]
+Name=With phone access
+Exec="$DIR/linux/ming-voice" --phone
+
+[Desktop Action stop]
+Name=Stop Ming Voice
+Exec="$DIR/linux/ming-voice" --stop
+EOF
+}
+
+install_shortcuts() {
+  mkdir -p "$HOME/.local/bin" "$APPS" "$ICONS"
+  ln -sf "$DIR/linux/ming-voice" "$HOME/.local/bin/ming-voice"
+  cp "$DIR/linux/ming-voice.svg" "$ICONS/ming-voice.svg"
+  desktop_entry "" >"$APPS/ming-voice.desktop"
+  command -v update-desktop-database >/dev/null && update-desktop-database -q "$APPS" 2>/dev/null
+  echo "Added Ming Voice to your app menu, and the ming-voice command (~/.local/bin)."
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "(~/.local/bin isn't on your PATH yet: open a new terminal, or run $DIR/linux/ming-voice)" ;; esac
+}
+
+BROWSER=1 PHONE=0 CLIENT=0 ACTION=start
+for a in "$@"; do
+  case $a in
+    --always-on | --headless) CLIENT=1 BROWSER=0 ;;
+    --phone) PHONE=1 ;;
+    --no-browser) BROWSER=0 ;;
+    --stop | --status | --logs | --autostart | --no-autostart | --install-shortcuts | --uninstall-shortcuts) ACTION=${a#--} ;;
+    -h | --help) sed -n '2,/^set /p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown option: $a (see ming-voice --help)"; exit 2 ;;
+  esac
+done
+
+case $ACTION in
+  stop)
+    [ -x "$PY" ] && "$PY" "$DIR/windows/ming_client.py" --stop >/dev/null 2>&1 && echo "Stopped the always-on client."
+    stop_group "$PROXY_PID" "phone access"
+    stop_group "$SERVER_PID" "the server"
+    health >/dev/null && echo "A server is still running on port $PORT that ming-voice didn't start (./run.sh in a terminal?): stop it there."
+    exit 0 ;;
+  status)
+    h=$(health) && echo "server: $(ready "$h" && echo ready || echo loading) at $URL" || echo "server: not running"
+    alive "$PROXY_PID" && echo "phone access: on (port ${MING_PHONE_PORT:-8443})" || echo "phone access: off"
+    exit 0 ;;
+  logs) exec tail -n 50 -f "$DIR/server.log" ;;
+  autostart)
+    opts=$( [ $CLIENT = 1 ] && printf ' --always-on'; [ $PHONE = 1 ] && printf ' --phone'; [ $BROWSER = 1 ] && [ $CLIENT = 0 ] && printf ' --no-browser')
+    mkdir -p "$(dirname "$AUTOSTART")"
+    desktop_entry "${opts# }" autostart >"$AUTOSTART"
+    echo "Ming Voice will start when you log in (ming-voice${opts}). Undo: ming-voice --no-autostart"
+    exit 0 ;;
+  no-autostart) rm -f "$AUTOSTART"; echo "Autostart removed."; exit 0 ;;
+  install-shortcuts) install_shortcuts; exit 0 ;;
+  uninstall-shortcuts)
+    rm -f "$HOME/.local/bin/ming-voice" "$APPS/ming-voice.desktop" "$ICONS/ming-voice.svg" "$AUTOSTART"
+    echo "Removed the shortcuts."; exit 0 ;;
+esac
+
+start_server
+[ $PHONE = 1 ] && start_phone
+wait_ready
+say "Ming Voice is ready at $URL"
+[ $CLIENT = 1 ] && start_client
+if [ $BROWSER = 1 ]; then
+  command -v xdg-open >/dev/null && xdg-open "$URL" >/dev/null 2>&1 &
+fi
+exit 0

@@ -16,7 +16,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-os.environ.setdefault("HSA_ENABLE_DXG_DETECTION", "1")
+if os.path.exists("/dev/dxg"):  # WSL: ROCm reaches the GPU through the Windows driver
+    os.environ.setdefault("HSA_ENABLE_DXG_DETECTION", "1")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 # Encode >30 s inputs one 30 s Whisper chunk at a time (lower peak VRAM; same result).
