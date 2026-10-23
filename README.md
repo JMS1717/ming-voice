@@ -22,6 +22,16 @@ keeps your shopping list, remembers what you tell it, and controls Home Assistan
 **No audio leaves your machine.** With tools on, only search terms and place names go out (to DuckDuckGo or
 Brave Search, and Open-Meteo); turn tools off in Settings to stay fully offline.
 
+## See it in action
+
+<div align="center">
+
+<a href="https://www.youtube.com/shorts/JiUd3QXpypo"><img src="https://img.youtube.com/vi/JiUd3QXpypo/hqdefault.jpg" alt="Ming Voice demo video — click to watch on YouTube" width="360"></a>
+
+<p><a href="https://www.youtube.com/shorts/JiUd3QXpypo"><strong>▶ Watch the Ming Voice demo</strong></a><br><sub>Demo by <a href="https://github.com/JMS1717">@JMS1717</a> · Opens on YouTube</sub></p>
+
+</div>
+
 ## Highlights
 
 **Conversation that feels natural**
