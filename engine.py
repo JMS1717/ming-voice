@@ -1157,7 +1157,9 @@ class Thinker:
                 seen.update(repr(c) for c in calls)
                 used_tools = True
                 from tools import SIDE_EFFECTS
-                if gate is not None and any(n in SIDE_EFFECTS for n, _ in calls) and not gate():
+                # (gated on the tool that will really run: a web_search for "turn off the lamp" runs home_assistant)
+                if gate is not None and any(self.tools.resolve(n, a)[0] in SIDE_EFFECTS for n, a in calls) \
+                        and not gate():
                     break  # a speculative reply that was dropped: never switch lights or start tasks for it
                 results, says = [], []
                 for name, args in calls:

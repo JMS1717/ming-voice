@@ -4,6 +4,8 @@ cd "$(dirname "$0")"
 # Per-machine GPU settings written by install.sh (which GPU to use, GFX version override)
 [ -f .gpu_env ] && . ./.gpu_env
 export TRITON_CACHE_AUTOTUNING=1
+# The C compiler setup_env.sh put in .venv when the system has none (Triton builds its launcher with it)
+[ -z "${CC:-}" ] && [ -x .venv/bin/gcc ] && export CC="$PWD/.venv/bin/gcc"
 # Every reply runs on fresh threads; with glibc's default per-thread malloc arenas, freed audio/tensor buffers
 # fragment across dozens of arenas and resident memory grows ~50 MB per conversation. Two arenas: ~1 MB.
 export MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX:-2}

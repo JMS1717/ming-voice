@@ -8,7 +8,9 @@
 #   MING_PORT        server port                                  (default: 8000)
 #   -Phone           also start phone access (windows\lan_proxy.py: https on port 8443 of this PC)
 #   -Headless        always-on: no browser; windows\ming_client.py uses this PC's mic and speakers (wake word)
-param([switch]$Phone, [switch]$Headless)
+#   -Wyoming         also start the Home Assistant bridge (wyoming_bridge.py: Wyoming protocol on port 10300)
+#   -NoBrowser       just start (the server, and what the other switches ask for)
+param([switch]$Phone, [switch]$Headless, [switch]$Wyoming, [switch]$NoBrowser)
 $distro = if ($env:MING_WSL_DISTRO) { $env:MING_WSL_DISTRO } else { 'Ubuntu' }
 $port = if ($env:MING_PORT) { $env:MING_PORT } else { '8000' }
 $dir = $env:MING_WSL_DIR
@@ -57,9 +59,18 @@ function Start-PhoneAccess {
     Write-Host 'Phone access started (https, port 8443). Press Phone in the app for the QR code.'
 }
 
+function Start-Wyoming {
+    $py = Get-WinPython
+    if (-not $py) { Write-Host 'The Home Assistant bridge needs Python for Windows (python.org).'; return }
+    # (it exits at once when it is already running: the port is taken)
+    Start-Process -FilePath $py -ArgumentList @("`"$(Join-Path (Split-Path -Parent $PSScriptRoot) 'wyoming_bridge.py')`"") -WindowStyle Minimized
+    Write-Host 'Home Assistant bridge started (Wyoming protocol, port 10300 of this PC).'
+}
+
 $h = Get-Health
 if ($Phone) { Start-PhoneAccess }
-if ($h -and $h.ready) { if ($Headless) { Start-Client } else { Start-Process $url }; exit 0 }
+if ($Wyoming) { Start-Wyoming }
+if ($h -and $h.ready) { if ($Headless) { Start-Client } elseif (-not $NoBrowser) { Start-Process $url }; exit 0 }
 
 if (-not $h) {
     $cmd = "PORT=$port MING_SUPERVISE=1 $dir/run.sh 2>&1 | grep --line-buffered -vE 'Warning|warn\(|bos_token|eos_token|scaled_dot|theta is None' | tee $dir/server.log"
@@ -81,5 +92,6 @@ while ($true) {
     }
 }
 if ($Headless) { Write-Host ''; Start-Client; exit 0 }
+if ($NoBrowser) { Write-Host "`nReady at $url"; exit 0 }
 Write-Host "`nReady - opening $url"
 Start-Process $url

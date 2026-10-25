@@ -61,6 +61,8 @@ Brave Search, and Open-Meteo); turn tools off in Settings to stay fully offline.
 **Made to be lived with**
 - Runs **always on** with the PC's own mic and speakers, no browser tab needed
 - **Use it from your phone** over HTTPS on your home network (QR code, installable web app)
+- **Inside Home Assistant's Assist** (Wyoming protocol): Ming as speech-to-text, text-to-speech and conversation
+  agent for a Voice PE, other voice satellites, or the Assist button in the HA app
 - 7 built-in voices plus **voice cloning** from a 5–15 s sample
 - Speaks numbers, money and units properly ("$1,299.99", "−5°C", "24-17", "12 km/h")
 - **OpenAI-compatible API** for text-to-speech, transcription, and chat with audio in and out
@@ -290,6 +292,41 @@ curl -X POST http://localhost:8000/api/announce -H "Content-Type: application/js
 An announcement waits for a quiet moment, plays a short chime, and is said whether the wake word was heard or
 not. `MING_HA_EVENTS=0` turns the event listener off.
 
+### In Home Assistant's voice assistants (Voice PE, satellites)
+
+Ming can also take part in Home Assistant's own **Assist** pipelines, so a Home Assistant Voice PE, an ESPHome or
+Wyoming satellite, or the Assist button in the HA app talks to Ming. `wyoming_bridge.py` speaks HA's Wyoming
+protocol on port 10300 and offers three services; use any mix of them (for example, keep your speech-to-text and
+use Ming for the rest):
+
+| Service | |
+|---|---|
+| Speech-to-text | Ming's own speech recognition (English and Chinese) |
+| Text-to-speech | Ming's voices, cloned ones included. When an LLM's reply streams in, it's spoken a sentence at a time |
+| Conversation agent | Ming's model with its tools: web search, weather, timers, lists, memory and Home Assistant. Each conversation keeps its context, and on a satellite "turn off the lights" means the lights in that satellite's area |
+
+1. Start the bridge with the server:
+   - **Windows:** `windows\Ming Voice (Home Assistant).cmd` (or `-Wyoming` for `start_ming_voice.ps1`). It runs on
+     Windows' Python, like phone access, since WSL2 can't be reached from the network. If Windows Firewall asks,
+     allow Python on private networks.
+   - **Linux:** `ming-voice --wyoming` (`ming-voice --autostart --wyoming` to start it at login). With a firewall,
+     allow port 10300/tcp.
+2. In Home Assistant: **Settings → Devices & services → Add integration → Wyoming Protocol**, with this PC's
+   address and port `10300`.
+3. **Settings → Voice assistants → Add assistant**: choose Ming as the conversation agent, speech-to-text and/or
+   text-to-speech, then pick that assistant on your Voice PE's device page.
+
+Good to know:
+- To control devices, Ming as the conversation agent uses its own Home Assistant access (`.ha_token`, see
+  [Tools](#tools)). Without a token, turn on **Prefer handling commands locally** in the assistant so Home
+  Assistant handles device commands and Ming the rest.
+- This route takes turns the way Assist does: the satellite records until you stop, then Ming transcribes,
+  answers and speaks. That's slower than Ming's own app and always-on client, which start answering during your
+  end-of-turn pause (the ~0.23 s), and it has no interrupting. Requests from several satellites take turns on the GPU.
+- The Wyoming protocol has no authentication, so the bridge only accepts connections from private-network
+  addresses. `--allow <Home Assistant's address>` (or `MING_WYOMING_ALLOW`) restricts it to Home Assistant.
+  Other options: `--port`, `--voice` (the default voice), `--services stt,tts,conversation`.
+
 ## OpenAI-compatible API
 
 The same server speaks the OpenAI API; interactive docs are at <http://localhost:8000/docs>.
@@ -298,7 +335,7 @@ The same server speaks the OpenAI API; interactive docs are at <http://localhost
 |---|---|
 | `POST /v1/audio/speech` | Text to speech: `{"input": "...", "voice": "US_Emma", "response_format": "wav"}` (wav, mp3, flac, pcm). wav and pcm stream as they're generated, first audio after ~0.12 s. OpenAI voice names (alloy, nova, …) map to built-in voices; cloned voices work by name |
 | `POST /v1/audio/transcriptions` | Speech to text (multipart `file`), any length, English or Chinese |
-| `POST /v1/chat/completions` | Chat with text and/or audio input (`input_audio` parts) and optional spoken output (`"modalities": ["text", "audio"]`); `stream: true` streams text and pcm16 audio. Greedy decoding, no tools |
+| `POST /v1/chat/completions` | Chat with text and/or audio input (`input_audio` parts) and optional spoken output (`"modalities": ["text", "audio"]`); `stream: true` streams text and pcm16 audio. Greedy decoding. OpenAI function calling isn't supported, but `"ming": {"tools": true}` lets the reply use Ming's own tools (and `"room": "Kitchen"` sets the Home Assistant area) |
 | `GET /v1/models` | `ming-3.0-audio-tiny` |
 
 ```bash
@@ -345,6 +382,7 @@ conversation.
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | Bind address. Local-only by default; use the phone proxy for other devices. `HOST=0.0.0.0` exposes port 8000 directly, without HTTPS (no microphone in browsers) and without a key unless `MING_API_KEY` is set |
 | `MING_LAN_PORT` | `8001` | Key-protected port for the phone proxy (localhost only; `lan_proxy.py --target`) |
 | `MING_API_KEY` | – | Require this key (`Authorization: Bearer …`) on every port, including localhost |
+| `MING_WYOMING_PORT` / `MING_WYOMING_ALLOW` | `10300` / private networks | The Home Assistant bridge's port, and who may connect (comma-separated addresses or networks) |
 | `MING_MODEL_DIR` | `./model` | Model folder |
 | `MING_MAX_CTX` | `8192` (`16384` from 32 GB of VRAM, `4096` in int8 mode) | Conversation context in tokens. Costs VRAM (~60 MB per 1k tokens, plus larger graph buffers) but not speed: attention only reads the filled part. When it fills up, the context is rebuilt between turns (~0.5 s) from the conversation so far as text |
 | `MING_INT8_EXPERTS` | `auto` | Weight-only int8 for the MoE experts (`1`, `0`, or `auto` = int8 below 23 GB VRAM). Identical greedy replies and transcripts on the test set, logit cosine ≥ 0.997 |
@@ -379,6 +417,7 @@ browser (static/index.html) ⇄ WebSocket: 16 kHz PCM in / 44.1 kHz PCM out ⇄ 
   tools.py    web search, weather, timers, lists, memory, Home Assistant, Jellyfin, Hermes
   ha.py       Home Assistant device list (registries over the websocket API), command parsing and control
   lan.py      access key + cookie login for the LAN port; windows/lan_proxy.py terminates HTTPS on Windows
+  wyoming_bridge.py  Home Assistant's Wyoming protocol (speech-to-text, text-to-speech, conversation) -> /v1 API
   engine.py   Thinker: Ming audio LLM (hybrid Kimi-delta-attention / MLA, 128-expert MoE)
                 - static-state cache, one HIP graph per attention-length bucket (8.7 ms/token)
                 - prefill graphs too: prompts padded to 32/64/128 tokens, padding made a no-op for the
@@ -399,6 +438,28 @@ The main speedups over the reference implementation came from replacing rocBLAS'
 kernels per active expert per layer plus a host sync, ~120 ms per turn, now ~15 ms), graph-capturing every
 per-token step, and hiding model latency inside the end-of-turn pause.
 
+## FAQ
+
+- **Does it run on a Home Assistant Green, a Raspberry Pi or a NAS?** No: it needs a PC with a 16 GB+ GPU. Home
+  Assistant can stay where it is. Ming reaches it over the network (HA's API, with a token), and HA can use Ming
+  in its voice assistants through the [Wyoming bridge](#in-home-assistants-voice-assistants-voice-pe-satellites).
+- **Is it a Home Assistant add-on?** No, it's a standalone app on the GPU machine: its own speech pipeline (one
+  audio model hears, thinks and speaks), its own web app and always-on client. It controls Home Assistant through
+  HA's API, says what HA automations send it, and can serve HA's Assist pipelines.
+- **Which GPUs work?** AMD RX 6800 or newer and NVIDIA RTX 30 series or newer, with 16 GB of VRAM or more (16 GB
+  cards use int8 experts, ~12.5 GB). 12 GB cards don't fit the model with its working memory. GTX 10/16 series,
+  RTX 20 series and Tesla P40 cards aren't supported (too little VRAM, or no bfloat16 support for the model's
+  GPU kernels).
+- **Apple Silicon?** Not supported: the model's code needs Triton GPU kernels (flash-linear-attention), which don't
+  run on Apple GPUs. Pull requests are welcome.
+- **Other languages?** The model understands and speaks English and Chinese only.
+- **Power use?** Between turns the GPU is idle (listening and voice detection run on the CPU), so it draws about
+  its normal idle power, with the VRAM full. It only works hard for the second or two of each answer. Stopping the
+  server (`ming-voice --stop`, or closing its window on Windows) frees the VRAM for games.
+- **Several rooms?** One device holds a live conversation at a time: the web app on a phone or tablet, or the
+  always-on client on a PC. For a speaker in every room, use Home Assistant voice satellites with the Wyoming
+  bridge; their requests take turns on the GPU.
+
 ## Troubleshooting
 
 - **`No HIP GPUs are available`**: in WSL, `HSA_ENABLE_DXG_DETECTION=1` must be set (`run.sh` does it). On Linux,
@@ -406,6 +467,10 @@ per-token step, and hiding model latency inside the end-of-turn pause.
 - **Linux, AMD GPU not listed by PyTorch** (e.g. an RX 6700 XT or 7600): the installer writes the closest supported
   GPU to `.gpu_env` (`HSA_OVERRIDE_GFX_VERSION`); edit or delete that file to change it. With an integrated GPU too,
   `.gpu_env` also picks the big one (`ROCR_VISIBLE_DEVICES`).
+- **`Python.h: No such file or directory` or `Failed to find C compiler`** at the first reply: Triton compiles a
+  small launcher there. `setup_env.sh` uses uv's own Python, which comes with its headers, and rebuilds an older
+  `.venv` that lacks them; without gcc or clang it installs Zig's compiler into `.venv`. Run `bash setup_env.sh`
+  again (or install `python3-dev` and `gcc`).
 - **The first request after idle takes minutes**: under WSL, an AMD GPU that drives no display stops serving WSL
   work promptly when idle. The server runs a tiny keep-alive kernel a few times per second.
 - **Slow loading or swapping**: the loader streams weights straight to the GPU; Hugging Face's loader peaks at

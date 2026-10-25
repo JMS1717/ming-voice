@@ -5,11 +5,12 @@
 #   ming-voice                 start (if needed) and open http://localhost:8000
 #   ming-voice --always-on     no browser: say "Hey Ming, ..." to this PC's mic any time
 #   ming-voice --phone         also start phone access (https on port 8443; press Phone in the app for the QR code)
+#   ming-voice --wyoming       also start the Home Assistant bridge (Wyoming protocol on port 10300)
 #   ming-voice --no-browser    just start the server
-#   ming-voice --stop          stop everything (server, phone access, always-on client)
+#   ming-voice --stop          stop everything (server, phone access, Home Assistant bridge, always-on client)
 #   ming-voice --status        what's running
 #   ming-voice --logs          follow the server log
-#   ming-voice --autostart [--always-on] [--phone]   start at login with those options; --no-autostart undoes it
+#   ming-voice --autostart [--always-on] [--phone] [--wyoming]   start at login with those options (--no-autostart)
 #   ming-voice --install-shortcuts                   app-menu entry + `ming-voice` command (install.sh does this)
 #   ming-voice --uninstall-shortcuts
 # Settings: MING_PORT (default 8000).
@@ -21,6 +22,7 @@ HEALTH="http://127.0.0.1:$PORT/api/health"
 PY="$DIR/.venv/bin/python"
 SERVER_PID="$DIR/.server.pid"
 PROXY_PID="$DIR/.lan_proxy.pid"
+WYOMING_PID="$DIR/.wyoming.pid"
 APPS=${XDG_DATA_HOME:-$HOME/.local/share}/applications
 ICONS=${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps
 AUTOSTART=${XDG_CONFIG_HOME:-$HOME/.config}/autostart/ming-voice.desktop
@@ -64,6 +66,13 @@ start_phone() {
   setsid "$PY" "$DIR/windows/lan_proxy.py" </dev/null >"$DIR/lan_proxy.log" 2>&1 &
   echo $! >"$PROXY_PID"
   say "Phone access: https on port ${MING_PHONE_PORT:-8443}. Press Phone in the app for the QR code (allow that port in your firewall if it has one)."
+}
+
+start_wyoming() {
+  alive "$WYOMING_PID" && return
+  setsid "$PY" "$DIR/wyoming_bridge.py" </dev/null >"$DIR/wyoming.log" 2>&1 &
+  echo $! >"$WYOMING_PID"
+  say "Home Assistant bridge: Wyoming protocol on port ${MING_WYOMING_PORT:-10300} (allow it in your firewall if it has one)."
 }
 
 start_client() {
@@ -125,11 +134,12 @@ install_shortcuts() {
   case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "(~/.local/bin isn't on your PATH yet: open a new terminal, or run $DIR/linux/ming-voice)" ;; esac
 }
 
-BROWSER=1 PHONE=0 CLIENT=0 ACTION=start
+BROWSER=1 PHONE=0 WYOMING=0 CLIENT=0 ACTION=start
 for a in "$@"; do
   case $a in
     --always-on | --headless) CLIENT=1 BROWSER=0 ;;
     --phone) PHONE=1 ;;
+    --wyoming) WYOMING=1 ;;
     --no-browser) BROWSER=0 ;;
     --stop | --status | --logs | --autostart | --no-autostart | --install-shortcuts | --uninstall-shortcuts) ACTION=${a#--} ;;
     -h | --help) sed -n '2,/^set /p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
@@ -141,16 +151,18 @@ case $ACTION in
   stop)
     [ -x "$PY" ] && "$PY" "$DIR/windows/ming_client.py" --stop >/dev/null 2>&1 && echo "Stopped the always-on client."
     stop_group "$PROXY_PID" "phone access"
+    stop_group "$WYOMING_PID" "the Home Assistant bridge"
     stop_group "$SERVER_PID" "the server"
     health >/dev/null && echo "A server is still running on port $PORT that ming-voice didn't start (./run.sh in a terminal?): stop it there."
     exit 0 ;;
   status)
     h=$(health) && echo "server: $(ready "$h" && echo ready || echo loading) at $URL" || echo "server: not running"
     alive "$PROXY_PID" && echo "phone access: on (port ${MING_PHONE_PORT:-8443})" || echo "phone access: off"
+    alive "$WYOMING_PID" && echo "Home Assistant bridge: on (port ${MING_WYOMING_PORT:-10300})" || echo "Home Assistant bridge: off"
     exit 0 ;;
   logs) exec tail -n 50 -f "$DIR/server.log" ;;
   autostart)
-    opts=$( [ $CLIENT = 1 ] && printf ' --always-on'; [ $PHONE = 1 ] && printf ' --phone'; [ $BROWSER = 1 ] && [ $CLIENT = 0 ] && printf ' --no-browser')
+    opts=$( [ $CLIENT = 1 ] && printf ' --always-on'; [ $PHONE = 1 ] && printf ' --phone'; [ $WYOMING = 1 ] && printf ' --wyoming'; [ $BROWSER = 1 ] && [ $CLIENT = 0 ] && printf ' --no-browser')
     mkdir -p "$(dirname "$AUTOSTART")"
     desktop_entry "${opts# }" autostart >"$AUTOSTART"
     echo "Ming Voice will start when you log in (ming-voice${opts}). Undo: ming-voice --no-autostart"
@@ -164,6 +176,7 @@ esac
 
 start_server
 [ $PHONE = 1 ] && start_phone
+[ $WYOMING = 1 ] && start_wyoming
 wait_ready
 say "Ming Voice is ready at $URL"
 [ $CLIENT = 1 ] && start_client

@@ -365,7 +365,7 @@ async def lifespan(_app):
 app = FastAPI(lifespan=lifespan, title="Ming Voice", version="1.5",
               description="Local speech-to-speech assistant. The web app is at `/`; the OpenAI-compatible API is "
                           "under `/v1`. From other devices (LAN port) send `Authorization: Bearer <access key>`.")
-api.setup(ENGINE, GPU_TURN, VOICES)
+api.setup(ENGINE, GPU_TURN, VOICES, TOOLBOX)
 app.include_router(api.router)
 app.add_middleware(lan.AccessControl)
 
@@ -409,6 +409,7 @@ def health():
     return {"ready": bool(ENGINE.get("ready")), "ctx_tokens": th.ctx_len() if th else 0,
             "max_ctx": th.max_ctx if th else 0, "connected": ACTIVE.get("sess") is not None,
             "talker_steps": getattr(ENGINE.get("talker"), "steps", None),
+            "home_assistant": "home_assistant" in TOOLBOX.names,
             "gpu_mem_gib": round(torch.cuda.memory_allocated() / 2**30, 2),
             "gpu_reserved_gib": round(torch.cuda.memory_reserved() / 2**30, 2),
             "gpu_free_gib": round(torch.cuda.mem_get_info()[0] / 2**30, 2)}

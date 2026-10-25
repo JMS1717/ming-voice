@@ -49,11 +49,15 @@ system_packages() {
   [ ${#need[@]} -eq 0 ] || [ "$FAMILY" != debian ] || need+=(ca-certificates)
   command -v openssl >/dev/null || want+=("$(pkg openssl)")
   [ $WSL = 1 ] || have_lib libportaudio.so.2 || want+=("$(pkg portaudio)")
+  # Triton compiles a small launcher at the first GPU kernel (without one, setup_env.sh falls back to Zig's clang)
+  if ! command -v gcc >/dev/null && ! command -v clang >/dev/null; then
+    want+=(gcc); [ "$FAMILY" != debian ] || want+=(libc6-dev)
+  fi
   [ $(( ${#need[@]} + ${#want[@]} )) -gt 0 ] || return 0
   say "Installing ${need[*]} ${want[*]}"
   if ! install_pkgs "${need[@]}" "${want[@]}" </dev/null; then
     [ ${#need[@]} -eq 0 ] || die "please install ${need[*]} with your package manager, then run this again."
-    note "Couldn't install ${want[*]}: phone access needs openssl and the always-on mode needs PortAudio."
+    note "Couldn't install ${want[*]}: phone access needs openssl, the always-on mode needs PortAudio."
   fi
 }
 system_packages

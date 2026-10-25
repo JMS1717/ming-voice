@@ -44,3 +44,4 @@ anchors/*.wav
 .gpu_env
 .server.pid
 .lan_proxy.pid
+.wyoming.pid

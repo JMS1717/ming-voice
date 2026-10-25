@@ -237,6 +237,11 @@ check("rather not" in lt.run("home_assistant", {"command": "unlock the car"})[1]
 lt.new_turn(lambda: "turn on the reading lamp")
 lt.run("web_search", {"query": "reading lamp on"})
 check(sent[-1] == "turn on the reading lamp", f"a device command, not a search: {sent}")
+# (the speculative-reply gate in Thinker.stream checks the tool that really runs: here a side effect)
+check(lt.resolve("web_search", {"query": "reading lamp on"})[0] in tools.SIDE_EFFECTS
+      and lt.resolve("calculate", {"expression": "2+2"}) == ("home_assistant", {"command": "turn on the reading lamp"})
+      and Toolbox(specs=tools.SPECS).resolve("web_search", {"query": "x"}) == ("web_search", {"query": "x"}),
+      "resolve: the tool that really runs")
 eb = Toolbox(specs=tools.SPECS)  # ending the conversation only when the user said goodbye
 for said, ok in (("okay thanks, bye", True), ("that's all for now", True), ("end the conversation", True),
                  ("goodnight ming", True), ("what's the weather tomorrow", False), ("stop", False)):

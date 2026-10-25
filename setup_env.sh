@@ -11,7 +11,14 @@ cd "$(dirname "$0")"
 GPU=${MING_GPU:-}
 [ -n "$GPU" ] || { nvidia-smi -L 2>/dev/null | grep -q GPU && GPU=nvidia || GPU=amd; }
 WSL=0; [ -e /dev/dxg ] && WSL=1
-[ -d .venv ] || uv venv -q -p 3.12 .venv
+# uv's own Python build: Triton compiles a small C launcher against Python.h at the first kernel, and a distro
+# Python often comes without its headers (python3-dev). An env made without them is made again.
+pyinc() { .venv/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["include"])' 2>/dev/null; }
+if [ -d .venv ] && [ ! -f "$(pyinc)/Python.h" ]; then
+  echo "Rebuilding .venv: its Python has no C headers (Triton needs them)"
+  rm -rf .venv
+fi
+[ -d .venv ] || uv venv -q -p 3.12 --managed-python .venv
 . .venv/bin/activate
 TORCH=(torch==2.11.0 torchaudio==2.11.0 torchvision==0.26.0)
 if [ "$GPU" = nvidia ]; then
@@ -49,6 +56,13 @@ else
   rm -f .venv/lib/python3.12/site-packages/torch/lib/libhsa-runtime64.so*
 fi
 python -c "import torch; print('PyTorch', torch.__version__)"
+# ...and a C compiler. Without gcc or clang (immutable distros like Bazzite), use the clang that comes with Zig (PyPI).
+if [ -z "${CC:-}" ] && ! command -v gcc >/dev/null && ! command -v clang >/dev/null; then
+  echo "No C compiler found: installing Zig's into .venv for Triton"
+  uv pip install -q ziglang
+  printf '#!/bin/sh\nexec "%s" -m ziglang cc "$@"\n' "$PWD/.venv/bin/python" >.venv/bin/gcc
+  chmod +x .venv/bin/gcc
+fi
 
 if [ "${MING_SKIP_MODEL:-0}" != 1 ]; then
   # Model (~20 GB) into ./model

@@ -4,7 +4,8 @@
   POST /v1/audio/speech          text -> speech (wav, mp3, flac, pcm; streamed for wav/pcm)
   POST /v1/audio/transcriptions  speech -> text (multipart upload, like Whisper's endpoint)
   POST /v1/chat/completions      chat with text and/or audio input (`input_audio` parts), text and optionally
-                                 spoken output (`modalities: ["text", "audio"]`), streamed with `stream: true`
+                                 spoken output (`modalities: ["text", "audio"]`), streamed with `stream: true`;
+                                 `"ming": {"tools": true}` lets the reply use the assistant's own tools
 
 Requests share the GPU with the live voice session (one at a time); chat requests run on an isolated copy
 of the conversation state, so they never disturb an ongoing voice conversation. Generation is greedy
@@ -43,8 +44,8 @@ OPENAI_VOICES = {"alloy": "US_Stella", "nova": "US_Emma", "shimmer": "UK_Charlot
                  "ash": "US_James", "ballad": "UK_George", "verse": "US_James"}
 
 
-def setup(engine: dict, gpu_lock: threading.Lock, voices: list[str]):
-    CTX.update(engine=engine, lock=gpu_lock, voices=voices)
+def setup(engine: dict, gpu_lock: threading.Lock, voices: list[str], toolbox=None):
+    CTX.update(engine=engine, lock=gpu_lock, voices=voices, tools=toolbox)
 
 
 def _err(msg: str, status: int = 400, code: str | None = None):
@@ -307,7 +308,10 @@ async def chat_completions(req: ChatRequest):
     """Chat completions with optional audio in and out (OpenAI audio-chat format):
     user content parts `{"type": "input_audio", "input_audio": {"data": <base64>, "format": "wav"}}`;
     `"modalities": ["text", "audio"], "audio": {"voice": "US_Stella", "format": "wav"}` for a spoken reply.
-    Generation is greedy; tools/function calling are not supported."""
+    Generation is greedy. OpenAI-style function calling is not supported; instead `"ming": {"tools": true,
+    "room": "Kitchen"}` gives the reply the assistant's own tools (web search, weather, timers, Home Assistant...,
+    as configured on the server; "room" is the Home Assistant area for "turn off the lights", or "device_id" a
+    Home Assistant device whose area it is)."""
     if not _ready():
         return _err("model is still loading", 503)
     body = req.model_dump()
@@ -329,6 +333,9 @@ async def chat_completions(req: ChatRequest):
     if want_audio and body.get("stream") and afmt != "pcm16":
         return _err("streaming audio output requires audio.format = pcm16")
     stream = bool(body.get("stream"))
+    ming = body.get("ming") if isinstance(body.get("ming"), dict) else {}
+    toolbox = CTX.get("tools") if ming.get("tools") else None
+    room = str(ming.get("room") or "")[:80]
     cid = "chatcmpl-" + uuid.uuid4().hex[:24]
     created = int(time.time())
     cancel = threading.Event()
@@ -340,6 +347,14 @@ async def chat_completions(req: ChatRequest):
         """Emits ("text", delta) and ("audio", float32 chunk) items."""
         with th.isolated():
             th.reset(sys_prompt or DEFAULT_SYSTEM_PROMPT)  # not the live session's persona
+            if toolbox is not None:  # (shared with the live session, which waits for the GPU lock meanwhile)
+                tb_saved = toolbox.room, toolbox.persona, toolbox.heard
+                where = room
+                if not where and ming.get("device_id"):  # a Home Assistant voice satellite: the room it's in
+                    from tools import ha_device_area
+                    where = ha_device_area(ming["device_id"])
+                toolbox.room, toolbox.persona = where, ""
+                th.set_tools(toolbox)
             hist = th.render_history(turns)
             # keep the history within half the context (oldest turns dropped first)
             while turns and len(th.tok(hist, add_special_tokens=False).input_ids) > th.max_ctx // 2:
@@ -373,6 +388,8 @@ async def chat_completions(req: ChatRequest):
                 if frag_q is not None:
                     frag_q.put(None)
                     tt.join()
+                if toolbox is not None:
+                    toolbox.room, toolbox.persona, toolbox.heard = tb_saved
             gen_tokens = len(th.tok(th.history[-1]["content"], add_special_tokens=False).input_ids) if th.history else 0
             usage.update(prompt_tokens=max(0, th.cur_len - gen_tokens), completion_tokens=gen_tokens,
                          total_tokens=th.cur_len)

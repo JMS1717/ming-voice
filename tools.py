@@ -435,6 +435,28 @@ def ha_token() -> str:
         return ""
 
 
+_DEVICE_AREAS: dict[str, str] = {}
+
+
+def ha_device_area(device_id: str) -> str:
+    """The Home Assistant area a device is in (a voice satellite asking through the Wyoming bridge), or ""."""
+    device_id = str(device_id or "")
+    if not re.fullmatch(r"[0-9a-f]{32}", device_id) or not ha_token():  # (a registry id: safe in the template)
+        return ""
+    if device_id not in _DEVICE_AREAS:
+        req = urllib.request.Request(f"{_ha_url()}/api/template", method="POST",
+                                     data=json.dumps({"template": f"{{{{ area_name('{device_id}') or '' }}}}"}).encode(),
+                                     headers={**UA, "Authorization": f"Bearer {ha_token()}",
+                                              "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=4) as r:
+                _DEVICE_AREAS[device_id] = r.read().decode().strip()
+        except Exception as e:
+            print(f"home_assistant: no area for device {device_id} ({e!r})", flush=True)
+            return ""
+    return _DEVICE_AREAS[device_id]
+
+
 # Direct control sees every device the token can (not only those exposed to Assist); MING_HA_DIRECT=0: Assist only.
 HA_DIRECT = os.environ.get("MING_HA_DIRECT", "1") == "1"
 
@@ -944,10 +966,10 @@ class Toolbox:
         if impl is None:
             return f"Error: there is no tool named {name!r}.", {"error": "unknown tool"}
         args = {k: v for k, v in (args or {}).items() if isinstance(k, str)}
-        if name not in ("home_assistant", "end_conversation", "lists", "memory") and self.heard is not None \
-                and self.direct(self.heard() or "") and not (name == "timer" and self._for_later(self.heard())):
+        if self.resolve(name)[0] != name:
             print(f"{name} for a device command ({self.heard()!r}): home_assistant instead", flush=True)
-            name, impl, args = "home_assistant", self._home_assistant, {"command": self.heard()}
+            name, args = self.resolve(name)
+            impl = self._home_assistant
         if name == "get_weather" and self.home and not str(args.get("location", "")).strip():
             args["location"] = self.home
         try:
@@ -997,6 +1019,15 @@ class Toolbox:
         return (f"Not done yet: this needs the user's confirmation, and you asked them: \"{say}\" If they say yes, "
                 f"call home_assistant again with the same command and confirmed=true; otherwise don't.",
                 {"say": say, "needs_confirmation": True})
+
+    def resolve(self, name: str, args: dict | None = None) -> tuple[str, dict | None]:
+        """The tool that really runs for a call: when what the user said is plainly a device command, home_assistant
+        with their words, whichever tool the model picked (a timer for later stays a timer)."""
+        if name in self.names and name not in ("home_assistant", "end_conversation", "lists", "memory") \
+                and self.heard is not None and self.direct(self.heard() or "") \
+                and not (name == "timer" and self._for_later(self.heard())):
+            return "home_assistant", {"command": self.heard()}
+        return name, args
 
     def direct(self, said: str) -> bool:
         """Is `said` plainly a command for the user's devices (ha.confident)? Then it goes to home_assistant."""
