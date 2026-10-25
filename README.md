@@ -385,7 +385,7 @@ conversation.
 | `MING_WYOMING_PORT` / `MING_WYOMING_ALLOW` | `10300` / private networks | The Home Assistant bridge's port, and who may connect (comma-separated addresses or networks) |
 | `MING_MODEL_DIR` | `./model` | Model folder |
 | `MING_MAX_CTX` | `8192` (`16384` from 32 GB of VRAM, `4096` in int8 mode) | Conversation context in tokens. Costs VRAM (~60 MB per 1k tokens, plus larger graph buffers) but not speed: attention only reads the filled part. When it fills up, the context is rebuilt between turns (~0.5 s) from the conversation so far as text |
-| `MING_INT8_EXPERTS` | `auto` | Weight-only int8 for the MoE experts (`1`, `0`, or `auto` = int8 below 23 GB VRAM). Identical greedy replies and transcripts on the test set, logit cosine ≥ 0.997 |
+| `MING_INT8_EXPERTS` | `auto` | Weight-only int8 for the MoE experts (`1`, `0`, or `auto` = int8 below 23 GB VRAM, or when the full model doesn't fit next to other programs). Identical greedy replies and transcripts on the test set, logit cosine ≥ 0.997 |
 | `MING_VRAM_LIMIT_GB` | – | Cap PyTorch's VRAM use (to emulate a smaller card) |
 | `MING_CFM_STEPS` | `10` | Talker flow-matching steps (fewer is faster but degrades speech) |
 | `MING_SMART_TURN` | `1` | Smart Turn end-of-turn detection |
@@ -467,6 +467,9 @@ per-token step, and hiding model latency inside the end-of-turn pause.
 - **Linux, AMD GPU not listed by PyTorch** (e.g. an RX 6700 XT or 7600): the installer writes the closest supported
   GPU to `.gpu_env` (`HSA_OVERRIDE_GFX_VERSION`); edit or delete that file to change it. With an integrated GPU too,
   `.gpu_env` also picks the big one (`ROCR_VISIBLE_DEVICES`).
+- **`out of GPU memory while loading`**: other programs hold VRAM (the log says how much). The launchers then
+  start again with int8 experts (~12.5 GB). Games and GPU-accelerated apps free it when closed; on Windows,
+  virtual or streaming displays (and high-resolution monitors) driven by the same GPU can also hold several GB.
 - **`Python.h: No such file or directory` or `Failed to find C compiler`** at the first reply: Triton compiles a
   small launcher there. `setup_env.sh` uses uv's own Python, which comes with its headers, and rebuilds an older
   `.venv` that lacks them; without gcc or clang it installs Zig's compiler into `.venv`. Run `bash setup_env.sh`

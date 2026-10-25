@@ -351,9 +351,27 @@ def _warmup():
         f"talker {time.time() - t_asr:.1f}s)")
 
 
+def _startup_oom():
+    """Out of GPU memory while loading: say why, and under the supervisor start again with int8 experts."""
+    free, total = torch.cuda.mem_get_info()
+    other = (total - free - torch.cuda.memory_reserved()) / 2**30
+    log(f"out of GPU memory while loading: other programs hold {other:.1f} of the GPU's {total / 2**30:.1f} GiB "
+        "(games and GPU-accelerated apps keep VRAM until they're closed)")
+    from engine import _want_int8_experts
+    if os.environ.get("MING_INT8_EXPERTS", "auto").lower() == "auto" and not _want_int8_experts():
+        if os.environ.get("MING_SUPERVISE") == "1":
+            log("starting again with int8 experts (~12.5 GB)")
+            os._exit(76)  # run.sh sets MING_INT8_EXPERTS=1
+        log("MING_INT8_EXPERTS=1 loads int8 experts instead (~12.5 GB)")
+
+
 @asynccontextmanager
 async def lifespan(_app):
-    await asyncio.get_running_loop().run_in_executor(None, _load)
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, _load)
+    except torch.cuda.OutOfMemoryError:
+        _startup_oom()
+        raise
     from tools import ha_token
     if ha_token() and os.environ.get("MING_HA_EVENTS", "1") != "0":
         threading.Thread(target=_ha_events, daemon=True, name="ha-events").start()

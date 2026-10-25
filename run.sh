@@ -19,7 +19,10 @@ export MING_SUPERVISE
 while :; do
     .venv/bin/python server.py "$@"
     rc=$?
-    case $rc in 0 | 98 | 130) exit $rc ;; esac
+    case $rc in
+    0 | 98 | 130) exit $rc ;;
+    76) export MING_INT8_EXPERTS=1 ;; # out of VRAM while loading (other programs hold some): int8 experts fit
+    esac
     echo "$(date +%H:%M:%S) server exited with code $rc: restarting in 10 s (Ctrl-C to stop)"
     sleep 10 || exit 130
 done
