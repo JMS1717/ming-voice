@@ -242,6 +242,26 @@ check(lt.resolve("web_search", {"query": "reading lamp on"})[0] in tools.SIDE_EF
       and lt.resolve("calculate", {"expression": "2+2"}) == ("home_assistant", {"command": "turn on the reading lamp"})
       and Toolbox(specs=tools.SPECS).resolve("web_search", {"query": "x"}) == ("web_search", {"query": "x"}),
       "resolve: the tool that really runs")
+# "what's the weather?" without a place: the client's home setting, else Home Assistant's home coordinates
+got = []
+saved_json, saved_home = tools._get_json, tools.ha_home
+tools._get_json = lambda url, **kw: got.append(url) or {
+    "results": [{"name": "Lyon", "country": "France", "country_code": "FR", "latitude": 45.7, "longitude": 4.8}],
+    "current": {"time": "2026-01-01T12:00", "temperature_2m": 5, "apparent_temperature": 3, "relative_humidity_2m": 80,
+                "weather_code": 3, "wind_speed_10m": 10, "is_day": 1},
+    "daily": {"time": ["2026-01-01"], "weather_code": [3], "temperature_2m_max": [6], "temperature_2m_min": [1],
+              "precipitation_probability_max": [20]}}
+tools.ha_home = lambda: {"latitude": 1.5, "longitude": 2.5, "name": "Home", "imperial": True}
+wb = Toolbox(specs=tools.SPECS)
+w1 = wb.run("get_weather", {"location": "your location"})
+wb.home = "Lyon"
+w2 = wb.run("get_weather", {"location": "here"})
+w3 = tools.get_weather("Lyon")
+tools._get_json, tools.ha_home = saved_json, saved_home
+check(w1[0].startswith("Weather for Home") and "°F" in w1[0] and "latitude=1.5" in got[0]
+      and w2[0].startswith("Weather for Lyon, France") and "°C" in w2[0] and w2[0].startswith(w3[0])
+      and tools._HERE.fullmatch("") and tools._HERE.fullmatch("the user's location")
+      and not tools._HERE.fullmatch("Homer"), f"weather here: {w1[0][:40]!r} {w2[0][:40]!r} {got}")
 eb = Toolbox(specs=tools.SPECS)  # ending the conversation only when the user said goodbye
 for said, ok in (("okay thanks, bye", True), ("that's all for now", True), ("end the conversation", True),
                  ("goodnight ming", True), ("what's the weather tomorrow", False), ("stop", False)):

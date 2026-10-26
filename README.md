@@ -303,7 +303,7 @@ use Ming for the rest):
 |---|---|
 | Speech-to-text | Ming's own speech recognition (English and Chinese) |
 | Text-to-speech | Ming's voices, cloned ones included. When an LLM's reply streams in, it's spoken a sentence at a time |
-| Conversation agent | Ming's model with its tools: web search, weather, timers, lists, memory and Home Assistant. Each conversation keeps its context, and on a satellite "turn off the lights" means the lights in that satellite's area |
+| Conversation agent | Ming's model with its tools: web search, weather, timers, lists, memory and Home Assistant. Each conversation keeps its context, and on a satellite "turn off the lights" means the lights in that satellite's area. "What's the weather?" is for Home Assistant's home location |
 
 1. Start the bridge with the server:
    - **Windows:** `windows\Ming Voice (Home Assistant).cmd` (or `-Wyoming` for `start_ming_voice.ps1`). It runs on

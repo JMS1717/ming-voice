@@ -139,27 +139,51 @@ _IMPERIAL = {"US", "LR", "MM"}
 
 
 _PLACES: dict[str, list] = {}  # geocoding results by lower-case place name
+# What the model passes for "what's the weather?" when it doesn't know where the user is
+_HERE = re.compile(r"(?i)\s*(here|home|outside|local|nearby|(my|your|our|the user'?s|current|this) "
+                   r"(location|area|city|town|place|home|house))?\s*")
+_HA_HOME = [{}, 0.0]  # Home Assistant's home, and when to ask again after a failed lookup
 
 
-def get_weather(location: str) -> tuple[str, dict]:
+def ha_home() -> dict:
+    """Home Assistant's home (its configured coordinates): where "here" is when the user hasn't said. {} without HA."""
+    if not _HA_HOME[0] and ha_token() and time.time() >= _HA_HOME[1]:
+        _HA_HOME[1] = time.time() + 600  # (the system prompt asks: don't wait on an unreachable HA every time)
+        req = urllib.request.Request(f"{_ha_url()}/api/config", headers={**UA, "Authorization": f"Bearer {ha_token()}"})
+        try:
+            with urllib.request.urlopen(req, timeout=4) as r:
+                c = json.load(r)
+            if isinstance(c.get("latitude"), (int, float)) and isinstance(c.get("longitude"), (int, float)):
+                _HA_HOME[0] = {"latitude": c["latitude"], "longitude": c["longitude"], "name": c.get("location_name"),
+                               "imperial": (c.get("unit_system") or {}).get("temperature") == "°F"}
+        except (OSError, ValueError):
+            pass
+    return _HA_HOME[0]
+
+
+def get_weather(location: str = "") -> tuple[str, dict]:
     location = (location or "").strip()
-    if not location:
-        return "Error: no location given. Ask the user where.", {}
-    # "Paris, France" -> search "Paris", prefer the matching country/admin area
-    name, _, hint = location.partition(",")
-    key = name.strip().lower()
-    if key not in _PLACES:  # (places don't move: one lookup per name saves a round trip on every later ask)
-        _PLACES[key] = _get_json("https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode(
-            {"name": name.strip(), "count": 10, "language": "en"})).get("results") or []
-    places = list(_PLACES[key])
-    if not places:
-        return f"Error: could not find a place called {location!r}.", {}
-    hint = hint.strip().lower()
-    if hint:
-        places = sorted(places, key=lambda p: not any(hint in str(p.get(k, "")).lower()
-                                                      for k in ("country", "country_code", "admin1", "admin2")))
-    p = places[0]
-    imperial = p.get("country_code") in _IMPERIAL
+    if _HERE.fullmatch(location):
+        home = ha_home()
+        if not home:
+            return "Error: no location given. Ask the user where.", {}
+        p, imperial = {**home, "name": home["name"] or "home"}, home["imperial"]
+    else:
+        # "Paris, France" -> search "Paris", prefer the matching country/admin area
+        name, _, hint = location.partition(",")
+        key = name.strip().lower()
+        if key not in _PLACES:  # (places don't move: one lookup per name saves a round trip on every later ask)
+            _PLACES[key] = _get_json("https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode(
+                {"name": name.strip(), "count": 10, "language": "en"})).get("results") or []
+        places = list(_PLACES[key])
+        if not places:
+            return f"Error: could not find a place called {location!r}.", {}
+        hint = hint.strip().lower()
+        if hint:
+            places = sorted(places, key=lambda p: not any(hint in str(p.get(k, "")).lower()
+                                                          for k in ("country", "country_code", "admin1", "admin2")))
+        p = places[0]
+        imperial = p.get("country_code") in _IMPERIAL
     unit, wind = ("fahrenheit", "mph") if imperial else ("celsius", "kmh")
     w = _get_json("https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode({
         "latitude": p["latitude"], "longitude": p["longitude"], "timezone": "auto", "forecast_days": 3,
@@ -773,7 +797,8 @@ SPECS = [
         "opening hours. Not for general knowledge.",
         {"query": {"type": "string", "description": "a short web search query"}}, ["query"]),
     _fn("get_weather", "Current weather and the 3-day forecast for a place.",
-        {"location": {"type": "string", "description": "city name, optionally with region or country, e.g. 'Paris, France'"}},
+        {"location": {"type": "string", "description": "city name, optionally with region or country, e.g. 'Paris, "
+                                                       "France'; empty for where the user is"}},
         ["location"]),
     _fn("calculate", "Evaluate arithmetic exactly (+ - * / ** %, sqrt, sin, log, pi...). Use for any calculation "
         "beyond simple mental math.",
@@ -970,7 +995,7 @@ class Toolbox:
             print(f"{name} for a device command ({self.heard()!r}): home_assistant instead", flush=True)
             name, args = self.resolve(name)
             impl = self._home_assistant
-        if name == "get_weather" and self.home and not str(args.get("location", "")).strip():
+        if name == "get_weather" and self.home and _HERE.fullmatch(str(args.get("location", ""))):
             args["location"] = self.home
         try:
             text, info = impl(**args)
@@ -1216,7 +1241,8 @@ class Toolbox:
 def tool_guidance(home: str = "") -> str:
     """How to use the tools in a spoken conversation (added to the persona's system prompt)."""
     today = _dt.date.today().strftime("%A, %B %d, %Y").replace(" 0", " ")
-    where = f" The user is in {home}." if home else ""
+    where = f" The user is in {home}." if home else \
+        " For the weather where the user is, call get_weather with location 'here'." if ha_home() else ""
     return (f"Today is {today}.{where} You have tools, but most questions don't need one: answer general knowledge "
             "(geography, science, history, well-known facts), advice, explanations, stories, jokes and conversation "
             "yourself, without tools and without mentioning them (when asked for a joke, just tell one). Call a tool "
