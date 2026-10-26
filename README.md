@@ -468,7 +468,7 @@ per-token step, and hiding model latency inside the end-of-turn pause.
   GPU to `.gpu_env` (`HSA_OVERRIDE_GFX_VERSION`); edit or delete that file to change it. With an integrated GPU too,
   `.gpu_env` also picks the big one (`ROCR_VISIBLE_DEVICES`).
 - **`out of GPU memory while loading`**: other programs hold VRAM (the log says how much). The launchers then
-  start again with int8 experts (~12.5 GB). Games and GPU-accelerated apps free it when closed; on Windows,
+  start again with int8 experts (~12.5 GB), and give up after three failed starts in a row. Games and GPU-accelerated apps free it when closed; on Windows,
   virtual or streaming displays (and high-resolution monitors) driven by the same GPU can also hold several GB.
 - **`Python.h: No such file or directory` or `Failed to find C compiler`** at the first reply: Triton compiles a
   small launcher there. `setup_env.sh` uses uv's own Python, which comes with its headers, and rebuilds an older
