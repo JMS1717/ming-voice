@@ -1,4 +1,6 @@
-# Docker images for each release: ghcr.io/<owner>/ming-voice:cuda and :rocm (also tagged with the version)
+# Docker images for each release: <owner>/ming-voice:cuda and :rocm (also tagged with the version) on Docker Hub
+# and ghcr.io. Docker Hub needs a DOCKERHUB_TOKEN secret (an access token with write access); without one, only
+# ghcr.io gets them.
 name: Docker images
 on:
   release:
@@ -11,6 +13,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -31,14 +35,27 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        if: env.DOCKERHUB_TOKEN != ''
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME || github.repository_owner }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
       - name: Tags
         id: tags
         run: |
-          img=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ming-voice
-          tags=$img:${{ matrix.flavor }}
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          imgs=(ghcr.io/$owner/ming-voice)
+          hub=${DOCKERHUB_USERNAME:-$owner}
+          [ -n "$DOCKERHUB_TOKEN" ] && imgs+=(docker.io/${hub,,}/ming-voice)
           ver=${GITHUB_REF_NAME#v}
-          [ "${{ github.event_name }}" = release ] && tags=$tags,$img:$ver-${{ matrix.flavor }}
-          echo "tags=$tags" >>"$GITHUB_OUTPUT"
+          tags=
+          for img in "${imgs[@]}"; do
+            tags=$tags,$img:${{ matrix.flavor }}
+            [ "${{ github.event_name }}" = release ] && tags=$tags,$img:$ver-${{ matrix.flavor }}
+          done
+          echo "tags=${tags#,}" >>"$GITHUB_OUTPUT"
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
       - uses: docker/build-push-action@v6
         with:
           context: .

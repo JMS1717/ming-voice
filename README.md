@@ -162,7 +162,8 @@ docker compose --profile nvidia up -d     # or: --profile amd
 
 Then open <http://localhost:8000>. The first start downloads the model (~20 GB) into the `ming-data` volume and
 compiles GPU kernels, which takes a while: `docker compose logs -f` shows how far it is. The images are
-`ghcr.io/jms1717/ming-voice:cuda` and `:rocm` (add `--build` to build one here instead).
+`ghcr.io/jms1717/ming-voice:cuda` and `:rocm`, also on Docker Hub as
+[`jms1717/ming-voice`](https://hub.docker.com/r/jms1717/ming-voice) (add `--build` to build one here instead).
 
 - **NVIDIA** needs the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
   on the host. **AMD** needs only the `amdgpu` driver: the container gets `/dev/kfd` and `/dev/dri`, and picks
