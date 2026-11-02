@@ -22,9 +22,9 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-CERTS = ROOT / "certs"
-INFO = ROOT / ".lan_info.json"
+DATA = Path(os.environ.get("MING_DATA_DIR") or Path(__file__).resolve().parent.parent)
+CERTS = DATA / "certs"
+INFO = DATA / ".lan_info.json"
 
 
 def lan_ips():

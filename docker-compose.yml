@@ -1,0 +1,36 @@
+# Ming Voice in Docker, on a Linux host. Pick your GPU:
+#   docker compose --profile nvidia up -d     NVIDIA (needs the NVIDIA Container Toolkit on the host)
+#   docker compose --profile amd up -d        AMD
+# then open http://localhost:8000. The first start downloads the model (~20 GB) into the ming-data volume.
+# `docker compose logs -f` shows the server log; add --build to build the image here instead of pulling it.
+x-ming: &ming
+  restart: unless-stopped
+  # Host networking, as a normal install: the app is on localhost:8000 (not on the LAN), and phone access puts
+  # this PC's LAN address in its QR code. Ports open to the LAN: 8443 (phone) and 10300 (Home Assistant).
+  network_mode: host
+  volumes:
+    - ming-data:/data
+  environment:
+    MING_PHONE: "0"    # 1: phone access (https on port 8443; press Phone in the app for the QR code)
+    MING_WYOMING: "0"  # 1: Home Assistant bridge (Wyoming protocol on port 10300)
+
+services:
+  ming-voice-nvidia:
+    <<: *ming
+    profiles: [nvidia]
+    image: ghcr.io/jms1717/ming-voice:cuda
+    build: { context: ., args: { GPU: nvidia } }
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, count: all, capabilities: [gpu] }]
+
+  ming-voice-amd:
+    <<: *ming
+    profiles: [amd]
+    image: ghcr.io/jms1717/ming-voice:rocm
+    build: { context: ., args: { GPU: amd } }
+    devices: [/dev/kfd, /dev/dri]
+
+volumes:
+  ming-data:

@@ -28,7 +28,7 @@ import urllib.request
 import uuid
 import wave
 
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 PROTOCOL = "1.8.0"  # (sent in event headers like the wyoming package does; clients don't check it)
 MODEL = "ming-3.0-audio-tiny"
 ATTRIBUTION = {"name": "inclusionAI", "url": "https://huggingface.co/inclusionAI/Ming-3.0-audio-tiny"}

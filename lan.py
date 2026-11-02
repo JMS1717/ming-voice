@@ -20,9 +20,9 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode
 
-HERE = Path(__file__).resolve().parent
-KEY_FILE = HERE / ".lan_key"
-INFO_FILE = HERE / ".lan_info.json"  # written by windows/lan_proxy.py: {"ips": [...], "port": 8443, "pid": ..}
+DATA = Path(os.environ.get("MING_DATA_DIR") or Path(__file__).resolve().parent)
+KEY_FILE = DATA / ".lan_key"
+INFO_FILE = DATA / ".lan_info.json"  # written by windows/lan_proxy.py: {"ips": [...], "port": 8443, "pid": ..}
 LAN_PORT = int(os.environ.get("MING_LAN_PORT", "8001"))
 COOKIE = "ming_key"
 

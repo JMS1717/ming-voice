@@ -1,0 +1,15 @@
+# Only the code goes into the image: no models, environments, or your settings and keys
+**/.*
+**/__pycache__
+**/*.log
+model/
+model_extra/
+wheels/
+voices/
+certs/
+samples/
+anchors/*.wav
+e2e/
+eval/
+dev/
+docs/

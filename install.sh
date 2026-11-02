@@ -84,20 +84,7 @@ free_gb=$(df -BG --output=avail . | tail -1 | tr -dc 0-9)
 # ---- GPU
 nv() { nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader,nounits 2>/dev/null | head -1 || true; }
 nv_card() { grep -qs 0x10de /sys/bus/pci/devices/*/vendor && grep -qs '^0x03' /sys/bus/pci/devices/*/class; }
-amd_best() {  # "<index among GPUs> <gfx name> <VRAM GiB> <GPU count>" of the AMD GPU with the most memory
-  local n i=0 best="" bmem=0 v mem
-  for n in $(ls -d /sys/class/kfd/kfd/topology/nodes/* 2>/dev/null | sort -t/ -k8 -n); do
-    v=$(awk '/gfx_target_version/ {print $2}' "$n/properties")
-    [ "${v:-0}" -gt 0 ] || continue
-    mem=$(cat "$n"/mem_banks/*/properties 2>/dev/null | awk '/size_in_bytes/ {s += $2} END {print int(s / 2^30)}')
-    if [ "$mem" -gt "$bmem" ]; then
-      bmem=$mem
-      best="$i gfx$((v / 10000))$((v / 100 % 100))$(printf %x $((v % 100)))"
-    fi
-    i=$((i + 1))
-  done
-  [ -n "$best" ] && echo "$best $bmem $i"
-}
+. scripts/amd_gpu.sh  # amd_best, amd_env
 
 RESTART=0 RELOGIN=0
 if [ $WSL = 1 ]; then
@@ -148,16 +135,7 @@ else
     read -r idx gfx mem count <<<"$amd"
     say "AMD GPU: $gfx (${mem} GB)"
     [ "$mem" -ge 15 ] || note "Ming Voice needs about 12.5 GB of GPU memory; this GPU may not have enough."
-    # an integrated GPU next to it: use only the big one
-    [ "$count" -gt 1 ] && echo "export ROCR_VISIBLE_DEVICES=$idx" >>.gpu_env
-    # GPUs that PyTorch's ROCm build doesn't list, but that run as their closest supported sibling
-    case $gfx in
-      gfx900 | gfx906 | gfx908 | gfx90a | gfx942 | gfx950 | gfx1030 | gfx1100 | gfx1101 | gfx1102 | gfx1150 | gfx1151 | gfx1200 | gfx1201) ;;
-      gfx103*) echo "export HSA_OVERRIDE_GFX_VERSION=10.3.0" >>.gpu_env ;;
-      gfx11*) echo "export HSA_OVERRIDE_GFX_VERSION=11.0.0" >>.gpu_env ;;
-      gfx120*) echo "export HSA_OVERRIDE_GFX_VERSION=12.0.1" >>.gpu_env ;;
-      *) note "$gfx isn't supported by PyTorch's ROCm build; it may not work." ;;
-    esac
+    amd_env "$idx" "$gfx" "$count" >>.gpu_env
     if [ -e /dev/kfd ] && { ! [ -r /dev/kfd ] || ! [ -w /dev/kfd ]; }; then
       groups=$(for g in render video; do getent group "$g" >/dev/null && printf '%s,' "$g"; done)
       say "Giving $USER access to the GPU (groups: ${groups%,}; asks for your password)"

@@ -23,6 +23,9 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+# Settings, keys and saved state: next to the code, or in MING_DATA_DIR (the Docker volume)
+DATA = Path(os.environ.get("MING_DATA_DIR") or Path(__file__).resolve().parent)
+
 UA = {"User-Agent": "ming-voice/1.0 (+https://github.com/JMS1717/ming-voice)"}
 
 
@@ -44,7 +47,7 @@ def _get_json(url: str, timeout: float = 3.5, tries: int = 2):
 # --------------------------------------------------------------------------- web search
 
 _NEWSY = re.compile(r"\b(news|latest|headlines?|today'?s|this week|announce[ds]?|breaking)\b", re.I)
-BRAVE_KEY_FILE = Path(__file__).resolve().parent / ".brave_key"
+BRAVE_KEY_FILE = DATA / ".brave_key"
 
 
 def brave_key() -> str:
@@ -264,7 +267,7 @@ def get_current_time(timezone: str = "") -> tuple[str, dict]:
 
 # --------------------------------------------------------------------------- timers and reminders
 
-TIMERS_FILE = Path(__file__).resolve().parent / ".timers.json"
+TIMERS_FILE = DATA / ".timers.json"
 _ONES = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen "
                                        "fourteen fifteen sixteen seventeen eighteen nineteen".split())}
 _TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
@@ -434,8 +437,8 @@ class Timers:
 
 # --------------------------------------------------------------------------- Home Assistant
 
-HA_TOKEN_FILE = Path(__file__).resolve().parent / ".ha_token"
-HA_URL_FILE = Path(__file__).resolve().parent / ".ha_url"
+HA_TOKEN_FILE = DATA / ".ha_token"
+HA_URL_FILE = DATA / ".ha_url"
 
 
 def _ha_url() -> str:
@@ -537,7 +540,7 @@ def assist(command: str) -> tuple[str, dict]:
 
 # --------------------------------------------------------------------------- Jellyfin
 
-JELLYFIN_FILE = Path(__file__).resolve().parent / ".jellyfin.json"
+JELLYFIN_FILE = DATA / ".jellyfin.json"
 
 
 def jellyfin_config() -> dict | None:
@@ -639,7 +642,7 @@ def jellyfin(action: str, query: str = "", device: str = "") -> tuple[str, dict]
 
 # --------------------------------------------------------------------------- Hermes (delegation)
 
-HERMES_FILE = Path(__file__).resolve().parent / ".hermes.json"
+HERMES_FILE = DATA / ".hermes.json"
 HERMES_INSTRUCTIONS = (
     "This task comes from the user's voice assistant, which will read your final answer aloud. Do the task fully, "
     "then end with a short spoken-style result: two or three plain sentences, no markdown, lists, links or code.")
@@ -668,8 +671,8 @@ def _hermes(method: str, path: str, body: dict | None = None, timeout: float = 1
 
 # --------------------------------------------------------------------------- lists and memory
 
-LISTS_FILE = Path(__file__).resolve().parent / ".lists.json"
-MEMORY_FILE = Path(__file__).resolve().parent / ".memory.json"
+LISTS_FILE = DATA / ".lists.json"
+MEMORY_FILE = DATA / ".memory.json"
 MAX_MEMORY = 40  # facts (they're in the system prompt)
 
 

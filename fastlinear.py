@@ -13,7 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
-CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".fastlinear_tuning.json")
+CACHE_FILE = os.path.join(os.environ.get("MING_DATA_DIR") or os.path.dirname(os.path.abspath(__file__)),
+                          ".fastlinear_tuning.json")
 
 
 @triton.jit

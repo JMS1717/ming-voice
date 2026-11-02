@@ -24,6 +24,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+# Settings, keys, cloned voices and caches: next to the code, or in MING_DATA_DIR (the Docker volume)
+DATA = Path(os.environ.get("MING_DATA_DIR") or HERE)
 
 import warnings
 
@@ -205,7 +207,7 @@ TOOLBOX.timers.start(_timer_fired)
 ECHO_DEBUG = bool(os.environ.get("MING_ECHO_DEBUG"))
 
 VOICES = ["US_Stella", "US_Emma", "US_James", "UK_George", "UK_Charlotte", "灵小柔", "灵楷"]
-VOICE_DIR = HERE / "voices"  # cloned voices: tiny speaker-embedding files
+VOICE_DIR = DATA / "voices"  # cloned voices: tiny speaker-embedding files
 FRAME = 512  # 32 ms @ 16 kHz (Silero VAD window)
 ENGINE: dict = {}
 GPU_TURN = threading.Lock()  # one reply generating at a time
@@ -271,7 +273,7 @@ def _load():
     log("READY — open http://localhost:%s" % os.environ.get("PORT", "8000"))
 
 
-CONVERSATION_FILE = HERE / ".conversation.json"
+CONVERSATION_FILE = DATA / ".conversation.json"
 RESUME_S = float(os.environ.get("MING_RESUME_S", "1800"))
 
 
@@ -314,7 +316,7 @@ def _warmup():
     src = b"".join((HERE / f).read_bytes() for f in ("engine.py", "fast_talker.py", "fastlinear.py",
                                                      "fused_moe.py", "direct_load.py"))
     stamp_val = hashlib.sha1(src + torch.__version__.encode()).hexdigest()
-    stamp = HERE / ".warmup_stamp"
+    stamp = DATA / ".warmup_stamp"
     full = not (stamp.exists() and stamp.read_text().strip() == stamp_val)
     lengths = [x / 2 for x in range(1, 25)] + [14, 17, 20, 25, 30, 40, 55] if full else [1.0, 3.0, 8.0]
     log(f"warmup: {'full shape sweep (first run for this code version)' if full else 'quick'}")
@@ -380,7 +382,7 @@ async def lifespan(_app):
     yield
 
 
-app = FastAPI(lifespan=lifespan, title="Ming Voice", version="1.7.0",
+app = FastAPI(lifespan=lifespan, title="Ming Voice", version="1.8.0",
               description="Local speech-to-speech assistant. The web app is at `/`; the OpenAI-compatible API is "
                           "under `/v1`. From other devices (LAN port) send `Authorization: Bearer <access key>`.")
 api.setup(ENGINE, GPU_TURN, VOICES, TOOLBOX)

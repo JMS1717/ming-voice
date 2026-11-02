@@ -105,9 +105,8 @@ Measured on a Radeon RX 7900 XTX (24 GB):
     On Linux it only needs the standard `amdgpu` driver that comes with your kernel: PyTorch brings its own ROCm 7.2,
     so there's no ROCm to install. On Windows: a recent Adrenalin driver with WSL support.
   - **NVIDIA** RTX 30 series or newer (e.g. RTX 3090, 4060 Ti 16 GB, 4080, 4090, 5080, 5090), with a current
-    driver (on Linux: your distro's NVIDIA driver, e.g. `nvidia-open` on Arch/CachyOS). *Experimental:* the
-    installer sets it up with CUDA PyTorch and the code is vendor-neutral, but it hasn't been tested on a 16 GB
-    NVIDIA card yet. Reports welcome!
+    driver (on Linux: your distro's NVIDIA driver, e.g. `nvidia-open` on Arch/CachyOS). A user reports it runs
+    well on an RTX 4090; it hasn't been tested on a 16 GB NVIDIA card yet. Reports welcome!
 - ~30 GB free disk (20 GB model + Python environment)
 
 ### Install
@@ -151,6 +150,34 @@ bash setup_env.sh                          # Python env (ROCm or CUDA PyTorch, n
 ```
 
 </details>
+
+### Docker (Linux)
+
+Prefer containers? On a Linux host with Docker and the GPU driver:
+
+```bash
+git clone https://github.com/JMS1717/ming-voice.git && cd ming-voice
+docker compose --profile nvidia up -d     # or: --profile amd
+```
+
+Then open <http://localhost:8000>. The first start downloads the model (~20 GB) into the `ming-data` volume and
+compiles GPU kernels, which takes a while: `docker compose logs -f` shows how far it is. The images are
+`ghcr.io/jms1717/ming-voice:cuda` and `:rocm` (add `--build` to build one here instead).
+
+- **NVIDIA** needs the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+  on the host. **AMD** needs only the `amdgpu` driver: the container gets `/dev/kfd` and `/dev/dri`, and picks
+  the GPU and any GFX override the way the installer does.
+- **Options** go in `environment:` in `docker-compose.yml`: `MING_PHONE: "1"` for phone access, `MING_WYOMING: "1"`
+  for the Home Assistant bridge, and any [environment variable](#settings-and-configuration), such as
+  `MING_HA_URL` / `MING_HA_TOKEN`, `MING_BRAVE_KEY` or `MING_JELLYFIN_URL` / `MING_JELLYFIN_KEY`.
+- It uses **host networking**, like a normal install: the app is on localhost only, and phone access (8443) and the
+  Home Assistant bridge (10300) are on this PC's LAN address.
+- **Your data** (the model, cloned voices, lists, memory, the saved conversation, settings files like `.ha_token`,
+  and kernel caches) is in the volume, at `/data` in the container, so updates keep it. Update with
+  `docker compose pull`, then the `up -d` line again.
+- The always-on client needs a microphone, so it isn't in the container: use the web app, phone access or Home
+  Assistant voice satellites.
+- On Windows, use the installer above: it runs Ming in WSL with direct GPU access.
 
 ### Run
 
@@ -384,6 +411,7 @@ conversation.
 | `MING_API_KEY` | – | Require this key (`Authorization: Bearer …`) on every port, including localhost |
 | `MING_WYOMING_PORT` / `MING_WYOMING_ALLOW` | `10300` / private networks | The Home Assistant bridge's port, and who may connect (comma-separated addresses or networks) |
 | `MING_MODEL_DIR` | `./model` | Model folder |
+| `MING_DATA_DIR` | the repo folder | Where cloned voices, lists, memory, timers, the saved conversation, settings files (`.ha_token`, `.brave_key`, …) and tuning caches are kept (`/data` in Docker) |
 | `MING_MAX_CTX` | `8192` (`16384` from 32 GB of VRAM, `4096` in int8 mode) | Conversation context in tokens. Costs VRAM (~60 MB per 1k tokens, plus larger graph buffers) but not speed: attention only reads the filled part. When it fills up, the context is rebuilt between turns (~0.5 s) from the conversation so far as text |
 | `MING_INT8_EXPERTS` | `auto` | Weight-only int8 for the MoE experts (`1`, `0`, or `auto` = int8 below 23 GB VRAM, or when the full model doesn't fit next to other programs). Identical greedy replies and transcripts on the test set, logit cosine ≥ 0.997 |
 | `MING_VRAM_LIMIT_GB` | – | Cap PyTorch's VRAM use (to emulate a smaller card) |
