@@ -991,7 +991,8 @@ class Thinker:
 
     @torch.inference_mode()
     def stream(self, wav16k: np.ndarray, cancel: threading.Event | None = None, max_new_tokens: int = 400,
-               user_text: str | None = None, history_text: str = "", events: bool = False, gate=None):
+               user_text: str | None = None, history_text: str = "", events: bool = False, gate=None,
+               history_turns: list[tuple[str, str]] | None = None):
         """Yield text deltas of the assistant reply to one user utterance (16 kHz mono float32) and/or text.
         history_text: earlier turns (render_history) inserted after the system prompt on a fresh context.
         With self.tools set, the model may call tools first; they run here (GPU idle meanwhile) and the reply
@@ -999,6 +1000,12 @@ class Thinker:
         gate(): called before a tool that changes something (tools.SIDE_EFFECTS); blocks until the reply is
         confirmed and returns False if it was dropped (speculative replies), which ends the reply there."""
         cancel = cancel or threading.Event()
+        if history_turns is not None:
+            history_text = self.render_history(history_turns)
+            first = 0
+            while first < len(history_turns) and len(self.tok(history_text, add_special_tokens=False).input_ids) > self.max_ctx // 2:
+                first += 1
+                history_text = self.render_history(history_turns[first:])
         feats = {}
         human = ""
         heard = {}

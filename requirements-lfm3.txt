@@ -1,0 +1,17 @@
+# Experimental LFM3-Audio backend. GPU PyTorch, torchaudio and torchvision come from setup_env.sh.
+transformers==5.20.2
+huggingface-hub[hf_xet]==1.33.0
+accelerate==1.10.1
+librosa==0.11.0
+safetensors==0.8.0
+soundfile==0.14.0
+numpy==2.5.4
+onnxruntime==1.31.0
+fastapi==0.153.0
+uvicorn[standard]==0.54.0
+python-multipart==0.0.20
+segno==1.6.6
+silero-vad==6.2.3
+websockets==17.3
+ddgs==9.16.0
+sounddevice==0.5.6

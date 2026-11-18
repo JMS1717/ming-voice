@@ -15,6 +15,7 @@ certs/
 .hermes.json
 .jellyfin.json
 .brave_key
+.keenable_key
 .timers.json
 .conversation.json
 .conversation.tmp

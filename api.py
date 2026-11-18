@@ -100,17 +100,18 @@ def _pcm16(x: np.ndarray) -> bytes:
     return (np.clip(x, -1, 1) * 32767).astype("<i2").tobytes()
 
 
-def _encode(audio: np.ndarray, fmt: str) -> tuple[bytes, str]:
+def _encode(audio: np.ndarray, fmt: str, sr=SR) -> tuple[bytes, str]:
     if fmt == "pcm":
-        return _pcm16(StreamResampler().push(audio, final=True)), "audio/pcm"
+        pcm = audio if sr == PCM_SR else StreamResampler(sr).push(audio, final=True)
+        return _pcm16(pcm), "audio/pcm"
     buf = io.BytesIO()
     if fmt == "mp3":
-        sf.write(buf, audio, SR, format="MP3")
+        sf.write(buf, audio, sr, format="MP3")
         return buf.getvalue(), "audio/mpeg"
     if fmt == "flac":
-        sf.write(buf, audio, SR, format="FLAC")
+        sf.write(buf, audio, sr, format="FLAC")
         return buf.getvalue(), "audio/flac"
-    sf.write(buf, audio, SR, format="WAV", subtype="PCM_16")
+    sf.write(buf, audio, sr, format="WAV", subtype="PCM_16")
     return buf.getvalue(), "audio/wav"
 
 
@@ -159,7 +160,9 @@ def _read_audio(data: bytes) -> np.ndarray:
 
 @router.get("/v1/models")
 def list_models():
-    return {"object": "list", "data": [{"id": MODEL_ID, "object": "model", "created": 0, "owned_by": "inclusionAI"}]}
+    engine = CTX["engine"]
+    return {"object": "list", "data": [{"id": engine.get("model_id", MODEL_ID), "object": "model", "created": 0,
+                                       "owned_by": engine.get("model_owner", "inclusionAI")}]}
 
 
 # ------------------------------------------------------------------------------------------------ speech
@@ -187,18 +190,19 @@ async def speech(req: SpeechRequest):
         return _err("input is empty")
     voice = _voice(req.voice)
     cancel = threading.Event()
+    talker = CTX["engine"]["talker"]
 
     def work(emit):
-        for pcm in CTX["engine"]["talker"].synth_stream(text, voice, cancel=cancel):
+        for pcm in talker.synth_stream(text, voice, cancel=cancel):
             if cancel.is_set():
                 break
             emit(pcm)
 
     if req.stream and fmt in ("wav", "pcm"):
         async def body():
-            rs = StreamResampler() if fmt == "pcm" else None
+            rs = StreamResampler(talker.SR) if fmt == "pcm" and talker.SR != PCM_SR else None
             if fmt == "wav":
-                yield _wav_stream_header()
+                yield _wav_stream_header(talker.SR)
             async for item in _thread_stream(work, cancel):
                 if isinstance(item, Exception):
                     return
@@ -212,7 +216,7 @@ async def speech(req: SpeechRequest):
             return _err(f"synthesis failed: {item}", 500)
         chunks.append(item)
     audio = np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
-    data, mime = _encode(audio, fmt)
+    data, mime = _encode(audio, fmt, talker.SR)
     return Response(data, media_type=mime)
 
 
@@ -341,6 +345,7 @@ async def chat_completions(req: ChatRequest):
     cancel = threading.Event()
     eng = CTX["engine"]
     th, tk = eng["thinker"], eng["talker"]
+    model_id = eng.get("model_id", MODEL_ID)
     usage = {}
 
     def work(emit):
@@ -355,11 +360,6 @@ async def chat_completions(req: ChatRequest):
                     where = ha_device_area(ming["device_id"])
                 toolbox.room, toolbox.persona = where, ""
                 th.set_tools(toolbox)
-            hist = th.render_history(turns)
-            # keep the history within half the context (oldest turns dropped first)
-            while turns and len(th.tok(hist, add_special_tokens=False).input_ids) > th.max_ctx // 2:
-                turns.pop(0)
-                hist = th.render_history(turns)
             frag_q = None
             if want_audio:
                 import queue
@@ -375,7 +375,7 @@ async def chat_completions(req: ChatRequest):
             n = 0
             try:
                 for delta in th.stream(wav, cancel=cancel, max_new_tokens=max_tokens, user_text=text or None,
-                                       history_text=hist):
+                                       history_turns=turns):
                     n += 1
                     emit(("text", delta))
                     if frag_q is not None:
@@ -407,21 +407,21 @@ async def chat_completions(req: ChatRequest):
         msg = {"role": "assistant", "content": reply.strip(), "refusal": None}
         if want_audio:
             audio = np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
-            data, _ = _encode(audio, "pcm" if afmt == "pcm16" else afmt)
+            data, _ = _encode(audio, "pcm" if afmt == "pcm16" else afmt, tk.SR)
             msg["content"] = None
             msg["audio"] = {"id": "audio_" + uuid.uuid4().hex[:16], "expires_at": created + 3600,
                             "data": base64.b64encode(data).decode(), "transcript": reply.strip()}
-        return {"id": cid, "object": "chat.completion", "created": created, "model": MODEL_ID,
+        return {"id": cid, "object": "chat.completion", "created": created, "model": model_id,
                 "choices": [{"index": 0, "message": msg, "finish_reason": "stop"}], "usage": usage}
 
     async def sse():
         def chunk(delta, finish=None):
             return "data: " + json.dumps({"id": cid, "object": "chat.completion.chunk", "created": created,
-                                          "model": MODEL_ID, "choices": [{"index": 0, "delta": delta,
+                                          "model": model_id, "choices": [{"index": 0, "delta": delta,
                                                                           "finish_reason": finish}]},
                                          ensure_ascii=False) + "\n\n"
         yield chunk({"role": "assistant", "content": "" if not want_audio else None})
-        rs = StreamResampler() if want_audio else None
+        rs = StreamResampler(tk.SR) if want_audio and tk.SR != PCM_SR else None
         aid = "audio_" + uuid.uuid4().hex[:16]
         async for item in _thread_stream(work, cancel):
             if isinstance(item, Exception):
@@ -431,7 +431,7 @@ async def chat_completions(req: ChatRequest):
             if kind == "text":
                 yield chunk({"audio": {"id": aid, "transcript": val}} if want_audio else {"content": val})
             else:
-                yield chunk({"audio": {"id": aid, "data": base64.b64encode(_pcm16(rs.push(val))).decode()}})
+                yield chunk({"audio": {"id": aid, "data": base64.b64encode(_pcm16(rs.push(val) if rs else val)).decode()}})
         if rs is not None:
             tail = rs.push(np.zeros(0, np.float32), final=True)
             if len(tail):
@@ -439,7 +439,7 @@ async def chat_completions(req: ChatRequest):
         yield chunk({}, "stop")
         if (body.get("stream_options") or {}).get("include_usage"):
             yield "data: " + json.dumps({"id": cid, "object": "chat.completion.chunk", "created": created,
-                                         "model": MODEL_ID, "choices": [], "usage": usage}) + "\n\n"
+                                         "model": model_id, "choices": [], "usage": usage}) + "\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(sse(), media_type="text/event-stream", headers={"cache-control": "no-cache"})

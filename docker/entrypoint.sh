@@ -3,7 +3,12 @@
 # with phone access (MING_PHONE=1) and the Home Assistant bridge (MING_WYOMING=1) next to it.
 set -euo pipefail
 cd /app
-. .venv/bin/activate
+. scripts/backend.sh
+if [ ! -x "$MING_VENV/bin/python" ]; then
+  echo "Build this image with --build-arg BACKEND=${MING_BACKEND:-ming} to install its dependencies." >&2
+  exit 3
+fi
+. "$MING_VENV/bin/activate"
 mkdir -p "$MING_DATA_DIR"
 
 if [ "$MING_GPU" = nvidia ] && [ ! -e /dev/nvidiactl ]; then
@@ -27,7 +32,7 @@ if [ "$MING_GPU" = amd ]; then
   fi
 fi
 
-if [ ! -f "$MING_MODEL_DIR/model.safetensors.index.json" ]; then
+if [ "${MING_BACKEND:-ming}" = ming ] && [ ! -f "$MING_MODEL_DIR/model.safetensors.index.json" ]; then
   echo "Downloading the model (~20 GB, the first start only) into $MING_MODEL_DIR"
   hf download inclusionAI/Ming-3.0-audio-tiny --local-dir "$MING_MODEL_DIR"
 fi

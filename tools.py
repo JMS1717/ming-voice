@@ -3,7 +3,7 @@
 The thinker (Ming-3.0's Bailing LLM) was trained for function calling: given the function signatures in its system
 prompt it emits <tool_call>name<arg_key>..</arg_key><arg_value>..</arg_value></tool_call> instead of an answer, and
 continues once the results come back in an OBSERVATION turn (see Thinker.stream). The basics need no API key:
-DuckDuckGo (via the ddgs package) for search (Brave Search too when .brave_key is set), Open-Meteo for weather.
+DuckDuckGo (via ddgs) and opt-in Keenable for search, Open-Meteo for weather. Brave Search takes an API key.
 Only the query text leaves the machine.
 """
 from __future__ import annotations
@@ -22,6 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Settings, keys and saved state: next to the code, or in MING_DATA_DIR (the Docker volume)
 DATA = Path(os.environ.get("MING_DATA_DIR") or Path(__file__).resolve().parent)
@@ -48,16 +49,20 @@ def _get_json(url: str, timeout: float = 3.5, tries: int = 2):
 
 _NEWSY = re.compile(r"\b(news|latest|headlines?|today'?s|this week|announce[ds]?|breaking)\b", re.I)
 BRAVE_KEY_FILE = DATA / ".brave_key"
+KEENABLE_KEY_FILE = DATA / ".keenable_key"
+
+
+def _search_key(env: str, path: Path) -> str:
+    if key := os.environ.get(env, "").strip():
+        return key
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ""
 
 
 def brave_key() -> str:
-    """A Brave Search API key (optional; https://brave.com/search/api), from MING_BRAVE_KEY or the .brave_key file."""
-    if os.environ.get("MING_BRAVE_KEY"):
-        return os.environ["MING_BRAVE_KEY"].strip()
-    try:
-        return BRAVE_KEY_FILE.read_text().strip()
-    except OSError:
-        return ""
+    return _search_key("MING_BRAVE_KEY", BRAVE_KEY_FILE)
 
 
 def _brave(query: str, news: bool, n: int) -> list[dict]:
@@ -84,32 +89,88 @@ def _brave(query: str, news: bool, n: int) -> list[dict]:
             for h in items if h.get("title") or h.get("description")]
 
 
+def _keenable(query: str, news: bool, n: int) -> list[dict]:
+    """Opt-in search, using the public endpoint if no key is configured."""
+    if os.environ.get("MING_KEENABLE") != "1":
+        return []
+    try:
+        key = _search_key("MING_KEENABLE_KEY", KEENABLE_KEY_FILE)
+        url = "https://api.keenable.ai/v1/search"
+        headers = {**UA, "Content-Type": "application/json", "X-Keenable-Title": "Ming Voice"}
+        if key:
+            headers["X-API-Key"] = key
+        else:
+            url += "/public"
+        payload = {"query": query, "max_results": n, "snippet_max_length": 300}
+        if news:
+            payload["published_after"] = "7d"
+        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
+        with urllib.request.urlopen(req, timeout=4) as response:
+            items = json.load(response).get("results") or []
+        hits = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("url") or ""
+            if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+                continue
+            title = item.get("title") or ""
+            body = item.get("snippet") or item.get("description") or ""
+            if title or body:
+                hits.append({"title": str(title), "href": url, "body": str(body),
+                             "date": str(item.get("published_at") or "")[:10],
+                             "source": urllib.parse.urlsplit(url).hostname or ""})
+        return hits
+    except Exception:  # the existing search providers still run if Keenable's request or response fails
+        return []
+
+
+def _ddgs_news(query: str, n: int) -> list[dict]:
+    try:
+        from ddgs import DDGS
+        return [{"title": h.get("title", ""), "body": h.get("body", ""), "href": h.get("url", ""),
+                 "date": (h.get("date") or "")[:10], "source": h.get("source", "")}
+                for h in DDGS().news(query, max_results=n)]
+    except Exception:
+        return []
+
+
+def _ddgs_web(query: str, backend: str, n: int) -> list[dict]:
+    try:
+        from ddgs import DDGS
+        return [h for h in DDGS().text(query, max_results=n, backend=backend)
+                if h.get("title") or h.get("body")]
+    except Exception:
+        return []
+
+
 def web_search(query: str, max_results: int = 5) -> tuple[str, dict]:
-    from ddgs import DDGS
     query = (query or "").strip()
     if not query:
         return "Error: empty query.", {}
-    hits = []
-    if _NEWSY.search(query):  # dated headlines beat landing pages for "latest news about X"
-        try:  # (DuckDuckGo's news ranks better than Brave's, which mixes in evergreen pages or minor blogs)
-            hits = [{"title": h.get("title", ""), "body": h.get("body", ""), "href": h.get("url", ""),
-                     "date": (h.get("date") or "")[:10], "source": h.get("source", "")}
-                    for h in DDGS().news(query, max_results=max_results)]
-        except Exception:
-            hits = []
+    if os.environ.get("MING_SEARCH_BACKEND", "").strip().lower() == "duckduckgo":
+        hits = _ddgs_web(query, "duckduckgo", max_results)
+    else:
+        hits = []
+        keenable = os.environ.get("MING_KEENABLE") == "1"
+        if _NEWSY.search(query):
+            # Keep the existing news ranking unless the user opts into Keenable.
+            if not keenable:
+                hits = _ddgs_news(query, max_results)
+            if len(hits) < 3:
+                hits += _brave(query, True, max_results)
+            if len(hits) < 3 and keenable:
+                hits += _keenable(query, True, max_results)
+                if len(hits) < 3:
+                    hits += _ddgs_news(query, max_results)
         if len(hits) < 3:
-            hits += _brave(query, True, max_results)
-    if len(hits) < 3:  # web results: Brave when a key is set (fresher, more reliable), else / then DuckDuckGo
-        hits += _brave(query, False, max_results)
-    if len(hits) < 3:
+            hits += _brave(query, False, max_results)
+        if len(hits) < 3 and keenable:
+            hits += _keenable(query, False, max_results)
         for backend in ("auto", "duckduckgo", "brave"):
-            try:
-                hits += [h for h in DDGS().text(query, max_results=max_results, backend=backend)
-                         if h.get("title") or h.get("body")]
-            except Exception:
-                continue
             if len(hits) >= 3:
                 break
+            hits += _ddgs_web(query, backend, max_results)
     seen, results = set(), []
     for h in hits:
         url = h.get("href", "")
@@ -253,15 +314,18 @@ def calculate(expression: str) -> tuple[str, dict]:
 
 # --------------------------------------------------------------------------- clock
 
-def get_current_time(timezone: str = "") -> tuple[str, dict]:
-    now = _dt.datetime.now().astimezone()
-    tz = (timezone or "").strip()
+def _local_now(timezone: str = "") -> _dt.datetime:
+    tz = (timezone or os.environ.get("TZ", "")).strip()
     if tz:
         try:
-            from zoneinfo import ZoneInfo
-            now = _dt.datetime.now(ZoneInfo(tz))
-        except Exception:
+            return _dt.datetime.now(ZoneInfo(tz))
+        except (ZoneInfoNotFoundError, ValueError):
             pass
+    return _dt.datetime.now().astimezone()
+
+
+def get_current_time(timezone: str = "") -> tuple[str, dict]:
+    now = _local_now((timezone or "").strip())
     return now.strftime("%A, %B %d, %Y, %I:%M %p %Z").replace(" 0", " "), {}
 
 
@@ -299,7 +363,7 @@ def _words_to_digits(s: str) -> str:
 def parse_when(when: str, now: _dt.datetime | None = None) -> tuple[_dt.datetime, bool] | None:
     """'10 minutes', 'an hour and a half', '90 seconds', 'at 5:30 pm', 'tomorrow at 9am', 'friday at noon'
     -> (due time, True if it was a duration), or None if it can't be understood."""
-    now = now or _dt.datetime.now().astimezone()
+    now = now or _local_now()
     s = " " + (when or "").lower().replace(",", " ") + " "
     s = re.sub(r"\bhalf an? (hour|minute)\b", r"0.5 \1", s)
     s = re.sub(r"\ban? (hour|minute|second)\b", r"1 \1", s)
@@ -334,7 +398,7 @@ def parse_when(when: str, now: _dt.datetime | None = None) -> tuple[_dt.datetime
         secs = float(bare.group(1)) * 60 if bare else 0  # "set a timer for 10": minutes
     if not 0 < secs <= 7 * 86400:
         return None
-    return now + _dt.timedelta(seconds=round(secs)), True
+    return _dt.datetime.fromtimestamp(now.timestamp() + round(secs), now.tzinfo), True
 
 
 def reminder_text(message: str) -> tuple[str, str]:
@@ -362,7 +426,7 @@ def spoken_duration(secs: float) -> str:
 
 
 def spoken_time(t: _dt.datetime, now: _dt.datetime | None = None) -> str:
-    now = now or _dt.datetime.now().astimezone()
+    now = now or _local_now()
     clock = t.strftime("%I:%M %p").lstrip("0").replace(":00 ", " ")
     days = (t.date() - now.date()).days
     return clock if days == 0 else f"tomorrow at {clock}" if days == 1 else f"{t.strftime('%A')} at {clock}"
@@ -1086,8 +1150,8 @@ class Toolbox:
                 command, ha.devices(_ha_url(), ha_token()), self.room):
             return None
         due, is_duration = when
-        now = _dt.datetime.now().astimezone()
-        spoken = f"in {spoken_duration((due - now).total_seconds())}" if is_duration else spoken_at(due, now)
+        now = _local_now()
+        spoken = f"in {spoken_duration(due.timestamp() - now.timestamp())}" if is_duration else spoken_at(due, now)
         what = re.sub(r"\bmy\b", "your", re.sub(r"\bme\b", "you", p["text"]))
         if is_risky(command):
             say = f"I'd rather not {what} on a timer. Ask me when you want it done."
@@ -1127,7 +1191,7 @@ class Toolbox:
     # -- timers and reminders (they go off through Timers.on_fire) --
     def _timer(self, action: str = "set", when: str = "", message: str = "") -> tuple[str, dict]:
         action, when, message = (action or "set").strip().lower(), str(when or "").strip(), str(message or "").strip()
-        now = _dt.datetime.now().astimezone()
+        now = _local_now()
         if action == "set":
             said = self.heard() if self.heard is not None else ""
             if message and HA_DIRECT and "home_assistant" in self.names and not re.search(
@@ -1141,12 +1205,12 @@ class Toolbox:
                         return later
                 except Exception as e:
                     print(f"timer: can't check for a device command ({e!r})", flush=True)
-            parsed = parse_when(when) or (parse_when(message) if not when else None)
+            parsed = parse_when(when, now) or (parse_when(message, now) if not when else None)
             if parsed is None:
                 return (f"Error: could not understand the time {when!r}. Ask the user when it should go off.",
                         {"error": "bad time"})
             due, is_duration = parsed
-            secs = (due - now).total_seconds()
+            secs = due.timestamp() - now.timestamp()
             message, alarm = reminder_text(message)
             self.timers.add(due.timestamp(), message, secs if is_duration else None, alarm)
             spoken = f"in {spoken_duration(secs)}" if is_duration else spoken_at(due, now)
@@ -1161,7 +1225,7 @@ class Toolbox:
                 (f"{spoken_duration(t['duration'])} timer" if t["duration"] and not t["label"] else
                  f"scheduled: {t['label']}" if t.get("ha") else f"reminder: {t['label'] or 'no message'}")
                 + f", {spoken_duration(t['due'] - time.time())} left (goes off at "
-                  f"{spoken_time(_dt.datetime.fromtimestamp(t['due']).astimezone(), now)})" for t in items), {}
+                  f"{spoken_time(_dt.datetime.fromtimestamp(t['due'], now.tzinfo), now)})" for t in items), {}
         if action == "cancel":
             which = (message or when).lower()
             if not items:

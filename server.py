@@ -205,6 +205,7 @@ TOOLBOX.on_delegate_done = _delegate_done
 TOOLBOX.timers.start(_timer_fired)
 
 ECHO_DEBUG = bool(os.environ.get("MING_ECHO_DEBUG"))
+BACKEND = os.environ.get("MING_BACKEND") or "ming"
 
 VOICES = ["US_Stella", "US_Emma", "US_James", "UK_George", "UK_Charlotte", "灵小柔", "灵楷"]
 VOICE_DIR = DATA / "voices"  # cloned voices: tiny speaker-embedding files
@@ -238,11 +239,20 @@ def _load():
         torch.cuda.set_per_process_memory_fraction(min(1.0, float(os.environ["MING_VRAM_LIMIT_GB"]) * 2**30 / total))
 
 
-    ENGINE["thinker"] = Thinker()  # load first: loading it after the Talker exceeds WSL's 15 GB RAM cap
-    import gc
-    gc.collect()
-    ENGINE["talker"] = Talker(use_graphs=os.environ.get("MING_GRAPHS", "1") == "1")
-    VOICES.extend(v for v in ENGINE["talker"].designed_voices if v not in VOICES)  # (e.g. Jarvis: dev/design_voice.py)
+    if BACKEND == "lfm3-audio":
+        from lfm3_audio import Lfm3Audio, MODEL_ID
+        log(f"loading experimental backend {MODEL_ID}")
+        ENGINE["thinker"] = ENGINE["talker"] = Lfm3Audio(DEFAULT_SYSTEM_PROMPT)
+        ENGINE["model_id"] = MODEL_ID
+        ENGINE["model_owner"] = "LiquidAI"
+    elif BACKEND == "ming":
+        ENGINE["thinker"] = Thinker()  # load first: loading it after the Talker exceeds WSL's 15 GB RAM cap
+        import gc
+        gc.collect()
+        ENGINE["talker"] = Talker(use_graphs=os.environ.get("MING_GRAPHS", "1") == "1")
+        VOICES.extend(v for v in ENGINE["talker"].designed_voices if v not in VOICES)
+    else:
+        raise ValueError("MING_BACKEND must be ming or lfm3-audio")
     ENGINE["vad_proto"] = load_silero_vad
     ENGINE["turn"] = None
     if os.environ.get("MING_SMART_TURN", "1") == "1":
@@ -254,12 +264,13 @@ def _load():
             log(f"smart turn model not found ({turn_detect.MODEL}); using the fixed end-of-turn pause")
     ENGINE["custom_voices"] = {}
     VOICE_DIR.mkdir(exist_ok=True)
-    for f in sorted(VOICE_DIR.glob("*.pt")):
-        try:
-            ENGINE["custom_voices"][f.stem] = torch.load(f, map_location="cuda:0")
-        except Exception as e:
-            log(f"could not load voice {f.name}: {e}")
-    _warmup()
+    if BACKEND == "ming":
+        for f in sorted(VOICE_DIR.glob("*.pt")):
+            try:
+                ENGINE["custom_voices"][f.stem] = torch.load(f, map_location="cuda:0")
+            except Exception as e:
+                log(f"could not load voice {f.name}: {e}")
+        _warmup()
     load_conversation(ENGINE["thinker"])
     # Start only after all graph captures (it must not launch kernels while a capture is running).
     # Without it, the first request after ~20 s of GPU idle stalls for minutes under WSL (not needed on native Linux).
@@ -360,7 +371,7 @@ def _startup_oom():
     log(f"out of GPU memory while loading: other programs hold {other:.1f} of the GPU's {total / 2**30:.1f} GiB "
         "(games and GPU-accelerated apps keep VRAM until they're closed)")
     from engine import _want_int8_experts
-    if os.environ.get("MING_INT8_EXPERTS", "auto").lower() == "auto" and not _want_int8_experts():
+    if BACKEND == "ming" and os.environ.get("MING_INT8_EXPERTS", "auto").lower() == "auto" and not _want_int8_experts():
         if os.environ.get("MING_SUPERVISE") == "1":
             log("starting again with int8 experts (~12.5 GB)")
             os._exit(76)  # run.sh sets MING_INT8_EXPERTS=1
@@ -428,6 +439,7 @@ def health():
     th = ENGINE.get("thinker")
     return {"ready": bool(ENGINE.get("ready")), "ctx_tokens": th.ctx_len() if th else 0,
             "max_ctx": th.max_ctx if th else 0, "connected": ACTIVE.get("sess") is not None,
+            "backend": BACKEND,
             "talker_steps": getattr(ENGINE.get("talker"), "steps", None),
             "home_assistant": "home_assistant" in TOOLBOX.names,
             "gpu_mem_gib": round(torch.cuda.memory_allocated() / 2**30, 2),
@@ -466,7 +478,7 @@ async def api_announce(req: Request):
 
 
 def _all_voices():
-    return {"builtin": VOICES, "custom": sorted(ENGINE.get("custom_voices", {}))}
+    return {"builtin": VOICES, "custom": sorted(ENGINE.get("custom_voices", {})), "cloning": BACKEND == "ming"}
 
 
 _MEM_SNAP: dict = {}
@@ -502,6 +514,8 @@ def list_voices():
 @app.post("/api/voices")
 async def create_voice(request: Request, name: str):
     """Clone a voice from a 3-30 s sample (WAV/FLAC/OGG/MP3 body)."""
+    if BACKEND != "ming":
+        return JSONResponse({"error": "Voice cloning is available with the Ming backend."}, status_code=409)
     import re as _re
     name = _re.sub(r"[^\w\- ]", "", name).strip()[:40]
     if not name or name in VOICES:
@@ -551,7 +565,7 @@ async def tts(text: str, voice: str = "US_Stella"):
             return ENGINE["talker"].synthesize(text[:300], v)
     audio = await asyncio.get_running_loop().run_in_executor(None, run)
     buf = io.BytesIO()
-    sf.write(buf, audio, Talker.SR, format="WAV", subtype="PCM_16")
+    sf.write(buf, audio, ENGINE["talker"].SR, format="WAV", subtype="PCM_16")
     return Response(buf.getvalue(), media_type="audio/wav")
 
 
@@ -764,10 +778,10 @@ class Session:
         live = r is not None and r.committed and r.active and not r.cancel.is_set()
         return live or time.time() < self.play_until
 
-    def echo_reference(self, pcm16_44k: bytes, start: float):
+    def echo_reference(self, pcm16: bytes, start: float):
         """Record what the client will play (16 kHz) and when, for the echo guard. Called from reply threads."""
-        x = torch.from_numpy(np.frombuffer(pcm16_44k, dtype="<i2").astype(np.float32) / 32768.0)
-        y = torchaudio.functional.resample(x, Talker.SR, 16000).numpy()
+        x = torch.from_numpy(np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0)
+        y = torchaudio.functional.resample(x, ENGINE["talker"].SR, 16000).numpy()
         with self.echo_lock:
             self.echo.add_playback(y, start)
 
@@ -1152,7 +1166,7 @@ class Session:
                         if cancel.is_set():
                             break
                         b = (np.clip(pcm, -1, 1) * 32767).astype("<i2").tobytes()
-                        r.emit("bytes", b, dur=len(pcm) / Talker.SR)
+                        r.emit("bytes", b, dur=len(pcm) / tk.SR)
                         n_samples[0] += len(pcm)
                 except Exception as e:
                     log("talker error:", repr(e))
@@ -1212,7 +1226,7 @@ class Session:
         ms = {"first_text": rel(m["first_text"]), "first_frag": rel(m["first_frag"]),
               "first_audio_sent": rel(r.t_first_audio_sent), "done": rel(t_done),
               "speculative": r.speculative, "head_start_ms": round((r.t_commit - r.t_start) * 1000),
-              "audio_s": round(n_samples[0] / Talker.SR, 2), "ctx_tokens": th.ctx_len()}
+              "audio_s": round(n_samples[0] / tk.SR, 2), "ctx_tokens": th.ctx_len()}
         log(f"turn: {text!r} | {ms}{' (interrupted)' if cancel.is_set() else ''}")
         r.emit("json", {"type": "done", "text": text, "metrics": ms, "interrupted": cancel.is_set()})
         self.loop.call_soon_threadsafe(self._replied)
@@ -1338,8 +1352,10 @@ async def ws_endpoint(ws: WebSocket):
     # the conversation so far, so a reloaded page (or the phone after switching apps) can show it again
     history = [{"user": h.get("user"), "assistant": h.get("content", ""), "interrupted": h.get("interrupted", False)}
                for h in list(th.history)]
-    await ws.send_text(json.dumps({"type": "hello", "voices": VOICES, "custom_voices": _all_voices()["custom"],
-                                   "sample_rate": Talker.SR, "system_prompt": th.system_prompt,
+    voices = _all_voices()
+    await ws.send_text(json.dumps({"type": "hello", "voices": VOICES, "custom_voices": voices["custom"],
+                                   "cloning": voices["cloning"], "sample_rate": ENGINE["talker"].SR,
+                                   "system_prompt": th.system_prompt,
                                    "history": history}, ensure_ascii=False))
 
     async def sender():
