@@ -1,0 +1,87 @@
+name: Validate Ming Voice PR 7
+on:
+  push:
+    branches: [codex/validate-ming-voice-pr-7]
+permissions:
+  contents: read
+jobs:
+  docker:
+    name: Docker build (${{ matrix.gpu }}, ${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu: [nvidia, amd]
+        backend: [ming, lfm3-audio]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free build space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          df -h /
+      - name: Validate launch scripts
+        run: |
+          for file in scripts/backend.sh setup_env.sh run.sh docker/entrypoint.sh linux/ming-voice; do bash -n "$file"; done
+      - name: Build and check timezone
+        run: |
+          docker build --build-arg GPU=${{ matrix.gpu }} --build-arg BACKEND=${{ matrix.backend }} -t ming-voice:test .
+          test "$(docker run --rm -e TZ=America/New_York --entrypoint date ming-voice:test -d '2026-07-01T12:00:00Z' '+%H %Z')" = '08 EDT'
+  lfm3:
+    name: Offline suites and real LFM3 CPU smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.11.0 torchaudio==2.11.0
+          python -m pip install -r requirements-lfm3.txt
+      - run: |
+          python dev/test_tools.py --offline
+          python dev/test_lfm3_audio.py
+      - name: Generate speech, transcribe speech, and answer a voice question
+        env:
+          OMP_NUM_THREADS: '2'
+          MKL_NUM_THREADS: '2'
+        run: |
+          python - <<'PY'
+          import threading
+          import torch
+          import torchaudio
+          from transformers import AutoModelForMultimodalLM, AutoProcessor
+          from lfm3_audio import Lfm3Audio, MODEL_ID, REVISION
+
+          backend = Lfm3Audio.__new__(Lfm3Audio)
+          backend.torch = torch
+          backend.device = "cpu"
+          backend.processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True, revision=REVISION)
+          backend.model = AutoModelForMultimodalLM.from_pretrained(
+              MODEL_ID, dtype=torch.float32, device_map="cpu", trust_remote_code=True, revision=REVISION
+          ).eval()
+          backend.codec = backend.processor.audio_tokenizer.eval()
+          backend.tok = backend.processor.tokenizer
+          backend.max_ctx = 4096
+          backend.lock = threading.Lock()
+          backend.reset("You are a helpful assistant. Answer in at most five words.")
+          pcm = backend.synthesize("What is two plus two?", "US_Stella")
+          assert pcm.size >= backend.SR // 2, f"Short waveform: {pcm.size}"
+          wave = torchaudio.functional.resample(torch.from_numpy(pcm), backend.SR, 16000).numpy()
+          transcript = backend.transcribe(wave, max_new_tokens=32)
+          assert "plus" in transcript.lower(), transcript
+          reply = " ".join(backend.stream(wave, max_new_tokens=24))
+          assert "four" in reply.lower() or "4" in reply, reply
+          print("Speech, transcription, and voice response verified.")
+          PY
+      - name: Check a keyless search
+        env:
+          MING_KEENABLE: '1'
+        run: |
+          python - <<'PY'
+          import tools
+          hits = tools._keenable("Keenable API search documentation", False, 3)
+          assert len(hits) > 0, "No live Keenable results"
+          print(f"Live Keenable returned {len(hits)} results")
+          PY
