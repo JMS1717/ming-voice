@@ -19,8 +19,9 @@ speech-to-speech model, into an assistant you can leave running at home. It hear
 finished, thinks, and speaks back, all on your own GPU. It checks the weather, searches the web, sets timers,
 keeps your shopping list, remembers what you tell it, and controls Home Assistant and Jellyfin.
 
-**No audio leaves your machine.** With tools on, only search terms and place names go out (to DuckDuckGo or
-Brave Search, and Open-Meteo); turn tools off in Settings to stay fully offline.
+**No audio leaves your machine.** Web search and weather send search terms and place names to search providers
+and Open-Meteo. Keenable receives search queries only when explicitly enabled. Turn tools off in Settings to
+stay fully offline once the models are downloaded.
 
 ## See it in action
 
@@ -105,8 +106,9 @@ Measured on a Radeon RX 7900 XTX (24 GB):
     On Linux it only needs the standard `amdgpu` driver that comes with your kernel: PyTorch brings its own ROCm 7.2,
     so there's no ROCm to install. On Windows: a recent Adrenalin driver with WSL support.
   - **NVIDIA** RTX 30 series or newer (e.g. RTX 3090, 4060 Ti 16 GB, 4080, 4090, 5080, 5090), with a current
-    driver (on Linux: your distro's NVIDIA driver, e.g. `nvidia-open` on Arch/CachyOS). A user reports it runs
-    well on an RTX 4090; it hasn't been tested on a 16 GB NVIDIA card yet. Reports welcome!
+    driver (on Linux: your distro's NVIDIA driver, e.g. `nvidia-open` on Arch/CachyOS).
+    An [RTX 4090 community report](https://github.com/JMS1717/ming-voice/issues/2) describes no noticeable
+    delay and estimates 0.43 kWh per day with Ming running. The report does not specify whole-system idle power.
 - ~30 GB free disk (20 GB model + Python environment)
 
 ### Install
@@ -171,6 +173,10 @@ compiles GPU kernels, which takes a while: `docker compose logs -f` shows how fa
 - **Options** go in `environment:` in `docker-compose.yml`: `MING_PHONE: "1"` for phone access, `MING_WYOMING: "1"`
   for the Home Assistant bridge, and any [environment variable](#settings-and-configuration), such as
   `MING_HA_URL` / `MING_HA_TOKEN`, `MING_BRAVE_KEY` or `MING_JELLYFIN_URL` / `MING_JELLYFIN_KEY`.
+- **Timezone**: put `TZ=America/New_York` (or your IANA time zone) in the Compose `.env` file beside
+  `docker-compose.yml`. Bring the service up again with the same GPU profile to apply it. The default is
+  `Etc/UTC`. With `docker run`, pass `-e TZ=America/New_York`. Use an image built with timezone data
+  (`docker compose --profile nvidia up -d --build`, or substitute `amd`).
 - It uses **host networking**, like a normal install: the app is on localhost only, and phone access (8443) and the
   Home Assistant bridge (10300) are on this PC's LAN address.
 - **Your data** (the model, cloned voices, lists, memory, the saved conversation, settings files like `.ha_token`,
@@ -195,6 +201,30 @@ Press **Start conversation**, allow the microphone, and talk. Pause when you're 
 
 > Windows: keep the server window open while you use it: WSL shuts its VM down when nothing is attached. Close it
 > when you're done, since it holds ~20 GB of VRAM.
+
+### Experimental LFM3-Audio backend
+
+[LiquidAI/LFM3-Audio-2B](https://huggingface.co/LiquidAI/LFM3-Audio-2B) is a smaller local backend for voice
+chat, transcription, speech synthesis and Ming Voice's tools. It uses the existing browser and API on Linux
+or in a WSL shell. It runs one 2B model for all three tasks and uses a separate Python environment.
+
+```bash
+MING_BACKEND=lfm3-audio bash setup_env.sh
+MING_BACKEND=lfm3-audio ./run.sh
+```
+
+The first launch downloads about 4.2 GB to the Hugging Face cache. If you already have a trusted, complete
+copy of the checkpoint, set `MING_LFM3_MODEL_DIR` to its path. The model weights are covered by the
+[LFM Open License](https://huggingface.co/LiquidAI/LFM3-Audio-2B/blob/main/LICENSE).
+
+Replies are generated as text and then voiced in chunks with LFM3's built-in language and gender presets.
+Custom and designed voices are available with the default Ming backend. LFM3-Audio is experimental on both
+ROCm and CUDA. Use `MING_BACKEND=ming` to switch back.
+
+For Docker, build an experimental image with `docker build --build-arg BACKEND=lfm3-audio -t ming-voice:lfm3 .`
+(default NVIDIA). For AMD, also pass `--build-arg GPU=amd`. In the selected Compose service, set `image:`
+to `ming-voice:lfm3`, then start it with `--no-build --pull never` so it uses the experimental image. The model cache
+lives in the existing `/data` volume.
 
 ## Using it
 
@@ -264,7 +294,7 @@ used and its sources.
 
 | Tool | Try saying | Needs |
 |---|---|---|
-| `web_search` | "Who won the game last night?", "research the best electric cars this year". DuckDuckGo, or Brave Search (fresher) with a key | optional `.brave_key` or `MING_BRAVE_KEY` ([Brave Search API](https://brave.com/search/api/), free tier) |
+| `web_search` | "Who won the game last night?", "research the best electric cars this year". DuckDuckGo, Brave Search or Keenable | DuckDuckGo works without an account. Brave uses `.brave_key` or `MING_BRAVE_KEY`. Set `MING_KEENABLE=1` for keyless Keenable |
 | `get_weather` | "What's the weather like this weekend?" Current weather and a 3-day forecast from Open-Meteo; "Your location" in Settings is the default | – |
 | `calculate`, `get_current_time` | Exact arithmetic; the time in other time zones (the local date and time come with every turn, so "what time is it?" needs no tool) | – |
 | `timer` | "Set a timer for 10 minutes", "remind me to call mom at 5 pm", "how long is left?", "cancel the pasta timer". When one goes off it chimes and says so, again every minute (twice more) until you answer. Kept in `.timers.json`, so they survive a restart | – |
@@ -273,6 +303,11 @@ used and its sources.
 | `home_assistant` | "Turn off the kitchen lights", "is the car locked?" "Which lights are on?", "turn off the living room lights". Ming reads HA's device, area and entity registries itself, so it sees **every** light, plug, lock, thermostat, fan, vacuum and speaker the token can (lamps on smart plugs count as lights; config and hidden entities are skipped), and the model is told your device names by room. Anything else goes to HA's own Assist. `MING_HA_DIRECT=0`: Assist only, so **only entities exposed to voice assistants** can be touched | `.ha_token` (HA → your profile → Security → long-lived token), `.ha_url` or `MING_HA_URL` (default `http://homeassistant.local:8123`) |
 | `jellyfin` | "Play The Office on the TV", "pause", "what's playing?", "do I have Dune?" Searches your library and controls open Jellyfin players; a series continues from the next unwatched episode | `.jellyfin.json`: `{"url": "http://<host>:8096", "key": "<API key>"}` |
 | `ask_hermes` | "Ask Hermes to …" hands a bigger job to a [Hermes Agent](https://github.com/NousResearch/hermes-agent) in the background; the answer is announced when it's ready. Only when you say "Hermes" (`MING_HERMES_AUTO=1` lets Ming hand it anything its own tools can't do) | `.hermes.json`: `{"url": "http://<host>:8642", "key": "<API_SERVER_KEY>"}` |
+
+Set `MING_SEARCH_BACKEND=duckduckgo` to use DuckDuckGo web results for all queries.
+With `MING_KEENABLE=1`, Ming tries Keenable after Brave and before the keyless fallback. An optional
+`MING_KEENABLE_KEY` or `.keenable_key` file in the data directory uses your Keenable account's limits.
+See the [Keenable Search API](https://docs.keenable.ai/api-reference/search) for its request limits.
 
 **Guard rails that keep it honest and safe:**
 - Tools that change something (timers, lists, memory, Home Assistant, Jellyfin, Hermes) never run for a
@@ -411,9 +446,10 @@ conversation.
 | `MING_LAN_PORT` | `8001` | Key-protected port for the phone proxy (localhost only; `lan_proxy.py --target`) |
 | `MING_API_KEY` | – | Require this key (`Authorization: Bearer …`) on every port, including localhost |
 | `MING_WYOMING_PORT` / `MING_WYOMING_ALLOW` | `10300` / private networks | The Home Assistant bridge's port, and who may connect (comma-separated addresses or networks) |
-| `MING_MODEL_DIR` | `./model` | Model folder |
+| `MING_BACKEND` | `ming` | Use `lfm3-audio` for the experimental LFM3-Audio-2B backend |
+| `MING_MODEL_DIR` / `MING_LFM3_MODEL_DIR` | `./model` / Hugging Face cache | Checkpoint path for the corresponding backend |
 | `MING_DATA_DIR` | the repo folder | Where cloned voices, lists, memory, timers, the saved conversation, settings files (`.ha_token`, `.brave_key`, …) and tuning caches are kept (`/data` in Docker) |
-| `MING_MAX_CTX` | `8192` (`16384` from 32 GB of VRAM, `4096` in int8 mode) | Conversation context in tokens. Costs VRAM (~60 MB per 1k tokens, plus larger graph buffers) but not speed: attention only reads the filled part. When it fills up, the context is rebuilt between turns (~0.5 s) from the conversation so far as text |
+| `MING_MAX_CTX` | `8192` (`16384` from 32 GB of VRAM, `4096` in int8 mode and on LFM3) | Conversation context in tokens. Ming preallocates ~60 MB per 1k tokens plus graph buffers and compacts between turns. LFM3 rebuilds a bounded context from recent text turns |
 | `MING_INT8_EXPERTS` | `auto` | Weight-only int8 for the MoE experts (`1`, `0`, or `auto` = int8 below 23 GB VRAM, or when the full model doesn't fit next to other programs). Identical greedy replies and transcripts on the test set, logit cosine ≥ 0.997 |
 | `MING_VRAM_LIMIT_GB` | – | Cap PyTorch's VRAM use (to emulate a smaller card) |
 | `MING_CFM_STEPS` | `10` | Talker flow-matching steps (fewer is faster but degrades speech) |
@@ -499,6 +535,9 @@ per-token step, and hiding model latency inside the end-of-turn pause.
 - **`out of GPU memory while loading`**: other programs hold VRAM (the log says how much). The launchers then
   start again with int8 experts (~12.5 GB), and give up after three failed starts in a row. Games and GPU-accelerated apps free it when closed; on Windows,
   virtual or streaming displays (and high-resolution monitors) driven by the same GPU can also hold several GB.
+- **Ming runs out of VRAM during a conversation**: on a 16 GB card, check the startup log for int8 experts
+  (`MING_INT8_EXPERTS=1` forces them). Try `MING_MAX_CTX=4096 MING_PREFILL_GRAPHS=0 ./run.sh` to use less
+  memory for context and graph buffers. Compare allocated, reserved and free VRAM at `/api/health` as you talk.
 - **`Python.h: No such file or directory` or `Failed to find C compiler`** at the first reply: Triton compiles a
   small launcher there. `setup_env.sh` uses uv's own Python, which comes with its headers, and rebuilds an older
   `.venv` that lacks them; without gcc or clang it installs Zig's compiler into `.venv`. Run `bash setup_env.sh`

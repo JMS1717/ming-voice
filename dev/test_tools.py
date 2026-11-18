@@ -17,8 +17,10 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import tools  # noqa: E402
 from tools import Toolbox, calculate, parse_tool_calls  # noqa: E402
 
 URL = os.environ.get("MING_URL", "localhost:8000")
@@ -43,6 +45,47 @@ for expr, want in (("17*23", "391"), ("2^10", "1024"), ("15% of 80", "12"), ("sq
     check(calculate(expr)[0].endswith("= " + want), f"calculate {expr} = {want}")
 check(calculate("__import__('os')")[0].startswith("Error"), "calculator refuses code")
 check(calculate("9**9**9")[0].startswith("Error"), "calculator refuses huge powers")
+
+with patch.dict(os.environ, {}, clear=True), patch.object(tools.urllib.request, "urlopen") as urlopen:
+    check(tools._keenable("weather", False, 5) == [] and not urlopen.called, "Keenable is off by default")
+    os.environ["MING_KEENABLE"] = "1"
+    response = {"results": [{"title": "Headline", "url": "https://example.com/story", "snippet": "A story",
+                             "published_at": "2026-11-18T00:00:00Z"}]}
+    urlopen.return_value.__enter__.return_value.read.return_value = json.dumps(response)
+    with patch.object(tools, "_search_key", return_value=""):
+        hits = tools._keenable("latest news", True, 5)
+    req = urlopen.call_args.args[0]
+    check(req.get_method() == "POST" and req.full_url.endswith("/v1/search/public")
+          and req.get_header("X-keenable-title") == "Ming Voice" and urlopen.call_args.kwargs["timeout"] == 4
+          and json.loads(req.data) == {"query": "latest news", "max_results": 5, "snippet_max_length": 300,
+                                      "published_after": "7d"}, "Keenable keyless request and news window")
+    check(hits == [{"title": "Headline", "href": "https://example.com/story", "body": "A story",
+                    "date": "2026-11-18", "source": "example.com"}], "Keenable maps result fields")
+    os.environ["MING_KEENABLE_KEY"] = "test-key"
+    tools._keenable("regular query", False, 5)
+    req = urlopen.call_args.args[0]
+    check(req.full_url.endswith("/v1/search") and req.get_header("X-api-key") == "test-key"
+          and "published_after" not in json.loads(req.data), "Keenable optional authenticated request")
+    urlopen.side_effect = TimeoutError
+    check(tools._keenable("regular query", False, 5) == [], "Keenable timeout permits fallback")
+
+with patch.dict(os.environ, {"MING_KEENABLE": "1", "MING_SEARCH_BACKEND": "auto"}), \
+        patch.object(tools, "_brave", return_value=[]) as brave, \
+        patch.object(tools, "_keenable", return_value=[]) as keenable, \
+        patch.object(tools, "_ddgs_news", return_value=[]) as news, \
+        patch.object(tools, "_ddgs_web", return_value=hits) as web:
+    _, info = tools.web_search("latest news")
+    check(info["sources"] == [{"title": "Headline", "url": "https://example.com/story"}]
+          and brave.call_args_list[0].args[1] and keenable.call_args_list[0].args[1] and news.called,
+          "Keenable news failure falls through to existing providers")
+    brave.reset_mock()
+    keenable.reset_mock()
+    news.reset_mock()
+    os.environ["MING_SEARCH_BACKEND"] = "duckduckgo"
+    tools.web_search("latest news")
+    check(web.call_args.args[1] == "duckduckgo" and not (brave.called or keenable.called or news.called),
+          "DuckDuckGo-only bypasses the other providers")
+
 import datetime as dt  # noqa: E402
 from tools import parse_when, spoken_duration  # noqa: E402
 now = dt.datetime(2026, 10, 21, 17, 0).astimezone()  # a Wednesday, 5 pm
@@ -55,6 +98,18 @@ for when, want in (("10 minutes", "17:10"), ("an hour and a half", "18:30"), ("h
     fmt = "%a %H:%M" if " " in want else "%H:%M:%S" if want.count(":") == 2 else "%H:%M"
     check(got is not None and got[0].strftime(fmt) == want, f"parse_when {when!r} -> {want} (got {got and got[0].strftime(fmt)})")
 check(parse_when("whenever", now) is None, "parse_when rejects nonsense")
+try:
+    new_york = tools.ZoneInfo("America/New_York")
+except tools.ZoneInfoNotFoundError:
+    print("SKIP named-zone checks (requires IANA timezone data)")
+else:
+    with patch.dict(os.environ, {"TZ": "America/New_York"}):
+        check(tools._local_now().tzinfo == new_york, "local clock uses TZ")
+    before_dst = dt.datetime(2026, 3, 7, 23, 0, tzinfo=new_york)
+    tomorrow, _ = parse_when("tomorrow at 9am", before_dst)
+    check(tomorrow.hour == 9 and tomorrow.utcoffset() == dt.timedelta(hours=-4), "reminder follows DST")
+    elapsed, _ = parse_when("4 hours", before_dst)
+    check(elapsed.timestamp() - before_dst.timestamp() == 14400, "timer measures elapsed seconds across DST")
 check(spoken_duration(5400) == "1 hour and 30 minutes", "spoken duration")
 from tools import reminder_text  # noqa: E402
 for msg, want in (("Remind me to stretch", ("stretch", "Time to stretch.")), ("A 10-minute timer is set.", ("", "")),
@@ -74,7 +129,7 @@ check(tb.run("timer", {"action": "cancel", "message": "the trash reminder"})[0] 
       len(tb.timers.items) == 1 and tb.timers.items[0]["duration"], "cancel by name keeps the other one")
 check(tb.run("timer", {"action": "cancel", "message": "all"})[0] == "Cancelled 1." and not tb.timers.items, "cancel all")
 tb.timers.path.unlink(missing_ok=True)
-import tools  # noqa: E402  risky Home Assistant actions need a yes in a later turn
+# Risky Home Assistant actions need a yes in a later turn.
 sent = []
 tools.home_assistant = lambda command, room="": (sent.append(command) or "Done.", {"targets": [command]})
 hb = Toolbox(specs=tools.SPECS + [tools.HA_SPEC])

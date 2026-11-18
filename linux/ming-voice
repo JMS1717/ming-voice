@@ -19,7 +19,8 @@ DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
 PORT=${MING_PORT:-8000}
 URL="http://localhost:$PORT"
 HEALTH="http://127.0.0.1:$PORT/api/health"
-PY="$DIR/.venv/bin/python"
+. "$DIR/scripts/backend.sh" || exit $?
+PY="$DIR/$MING_VENV/bin/python"
 SERVER_PID="$DIR/.server.pid"
 PROXY_PID="$DIR/.lan_proxy.pid"
 WYOMING_PID="$DIR/.wyoming.pid"

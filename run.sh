@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 cd "$(dirname "$0")"
+. scripts/backend.sh || exit $?
+python="$MING_VENV/bin/python"
+if [ ! -x "$python" ]; then
+    echo "Missing $MING_VENV. Run bash setup_env.sh with the same MING_BACKEND." >&2
+    exit 3
+fi
 [ -e /dev/dxg ] && export HSA_ENABLE_DXG_DETECTION=1  # WSL
 # Per-machine GPU settings written by install.sh (which GPU to use, GFX version override)
 [ -f .gpu_env ] && . ./.gpu_env
 export TRITON_CACHE_AUTOTUNING=1
 # The C compiler setup_env.sh put in .venv when the system has none (Triton builds its launcher with it)
-[ -z "${CC:-}" ] && [ -x .venv/bin/gcc ] && export CC="$PWD/.venv/bin/gcc"
+[ -z "${CC:-}" ] && [ -x "$MING_VENV/bin/gcc" ] && export CC="$PWD/$MING_VENV/bin/gcc"
 # Every reply runs on fresh threads; with glibc's default per-thread malloc arenas, freed audio/tensor buffers
 # fragment across dozens of arenas and resident memory grows ~50 MB per conversation. Two arenas: ~1 MB.
 export MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX:-2}
 # fla wraps a few helpers in torch.compile, which otherwise keeps 16 idle compile-worker processes (~0.6 GB)
 export TORCHINDUCTOR_COMPILE_THREADS=${TORCHINDUCTOR_COMPILE_THREADS:-1}
-[ "${MING_SUPERVISE:-0}" = 1 ] || exec .venv/bin/python server.py "$@"
+[ "${MING_SUPERVISE:-0}" = 1 ] || exec "$python" server.py "$@"
 
 # Always on (MING_SUPERVISE=1, as the Windows launcher starts it): start the server again when it crashes or hits
 # a GPU error it can't recover from. Ctrl-C (exit 0) and "port taken, already running" (98) end it, and so do
@@ -19,7 +25,7 @@ export TORCHINDUCTOR_COMPILE_THREADS=${TORCHINDUCTOR_COMPILE_THREADS:-1}
 export MING_SUPERVISE
 failed=0
 while :; do
-    .venv/bin/python server.py "$@"
+    "$python" server.py "$@"
     rc=$?
     case $rc in
     0 | 98 | 130) exit $rc ;;

@@ -6,6 +6,7 @@
 #   docker build --build-arg GPU=amd -t ming-voice:rocm .   AMD (ROCm 7.2)
 FROM ubuntu:24.04
 ARG GPU=nvidia
+ARG BACKEND=ming
 LABEL org.opencontainers.image.source=https://github.com/JMS1717/ming-voice \
       org.opencontainers.image.description="Ming Voice: a local, realtime speech-to-speech assistant" \
       org.opencontainers.image.licenses=MIT
@@ -13,16 +14,17 @@ LABEL org.opencontainers.image.source=https://github.com/JMS1717/ming-voice \
 # tini: passes `docker stop` on to the server.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-       ca-certificates curl gcc libc6-dev openssl tini \
+       ca-certificates curl gcc libc6-dev openssl tini tzdata \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:0.11.14 /uv /usr/local/bin/uv
 WORKDIR /app
 ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_LINK_MODE=copy
 # The Python env first: it changes far less often than the code
-COPY setup_env.sh requirements.txt ./
-RUN --mount=type=cache,target=/root/.cache/uv MING_GPU=$GPU MING_SKIP_MODEL=1 bash setup_env.sh
+COPY setup_env.sh requirements*.txt ./
+COPY scripts/backend.sh scripts/backend.sh
+RUN --mount=type=cache,target=/root/.cache/uv MING_GPU=$GPU MING_BACKEND=$BACKEND MING_SKIP_MODEL=1 bash setup_env.sh
 COPY . .
-ENV MING_GPU=$GPU MING_DATA_DIR=/data MING_MODEL_DIR=/data/model \
+ENV MING_GPU=$GPU MING_BACKEND=$BACKEND MING_DATA_DIR=/data MING_MODEL_DIR=/data/model \
     MING_TURN_MODEL=/data/model_extra/smart-turn-v3.2-cpu.onnx \
     HF_HOME=/data/cache/huggingface XDG_CACHE_HOME=/data/cache TRITON_CACHE_DIR=/data/cache/triton \
     TORCHINDUCTOR_CACHE_DIR=/data/cache/inductor \

@@ -734,6 +734,7 @@ function connect() {
       case 'hello': {
         sampleRate = m.sample_rate;
         fillVoices(m.voices, m.custom_voices || []);
+        $('cloneBox').hidden = m.cloning === false;
         if ((m.history || []).length && !transcript.length) restoreHistory(m.history);
         sendCfg(); break; }
       case 'vad':

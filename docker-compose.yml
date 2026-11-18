@@ -11,8 +11,11 @@ x-ming: &ming
   volumes:
     - ming-data:/data
   environment:
+    TZ: "${TZ:-Etc/UTC}"  # IANA zone for the clock and reminders, e.g. America/New_York
     MING_PHONE: "0"    # 1: phone access (https on port 8443; press Phone in the app for the QR code)
     MING_WYOMING: "0"  # 1: Home Assistant bridge (Wyoming protocol on port 10300)
+    MING_SEARCH_BACKEND: "${MING_SEARCH_BACKEND:-auto}"
+    MING_KEENABLE: "${MING_KEENABLE:-0}"
 
 services:
   ming-voice-nvidia:
