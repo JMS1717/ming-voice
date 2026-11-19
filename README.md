@@ -20,7 +20,7 @@ finished, thinks, and speaks back, all on your own GPU. It checks the weather, s
 keeps your shopping list, remembers what you tell it, and controls Home Assistant and Jellyfin.
 
 **No audio leaves your machine.** Web search and weather send search terms and place names to search providers
-and Open-Meteo. Keenable receives search queries only when explicitly enabled. Turn tools off in Settings to
+and Open-Meteo. Keenable and Parallel receive search queries only when explicitly enabled. Turn tools off in Settings to
 stay fully offline once the models are downloaded.
 
 ## See it in action
@@ -294,7 +294,7 @@ used and its sources.
 
 | Tool | Try saying | Needs |
 |---|---|---|
-| `web_search` | "Who won the game last night?", "research the best electric cars this year". DuckDuckGo, Brave Search or Keenable | DuckDuckGo works without an account. Brave uses `.brave_key` or `MING_BRAVE_KEY`. Set `MING_KEENABLE=1` for keyless Keenable |
+| `web_search` | "Who won the game last night?", "research the best electric cars this year". DuckDuckGo, Brave Search, Keenable or Parallel | DuckDuckGo and Parallel work without an account. Brave uses `.brave_key` or `MING_BRAVE_KEY`. Set `MING_KEENABLE=1` for keyless Keenable |
 | `get_weather` | "What's the weather like this weekend?" Current weather and a 3-day forecast from Open-Meteo; "Your location" in Settings is the default | – |
 | `calculate`, `get_current_time` | Exact arithmetic; the time in other time zones (the local date and time come with every turn, so "what time is it?" needs no tool) | – |
 | `timer` | "Set a timer for 10 minutes", "remind me to call mom at 5 pm", "how long is left?", "cancel the pasta timer". When one goes off it chimes and says so, again every minute (twice more) until you answer. Kept in `.timers.json`, so they survive a restart | – |
@@ -308,6 +308,17 @@ Set `MING_SEARCH_BACKEND=duckduckgo` to use DuckDuckGo web results for all queri
 With `MING_KEENABLE=1`, Ming tries Keenable after Brave and before the keyless fallback. An optional
 `MING_KEENABLE_KEY` or `.keenable_key` file in the data directory uses your Keenable account's limits.
 See the [Keenable Search API](https://docs.keenable.ai/api-reference/search) for its request limits.
+
+Set `MING_SEARCH_BACKEND=parallel` in the server's environment and restart Ming. If you updated an existing
+source checkout, rerun the environment setup for your voice backend first to install the MCP dependency.
+With Docker Compose, use an image that includes Parallel support, set the variable in `.env`, and run
+`docker compose --profile nvidia up -d` (use `amd` for AMD) to apply the new setting.
+
+When Ming calls `web_search` with Parallel enabled, it sends the search terms to `https://mcp.parallel.ai/mcp`.
+No account or key is needed. Free access is rate limited, and a failed request is shown as a search error.
+Ming sends its project User-Agent so Parallel can measure aggregate usage. Set `MING_SEARCH_BACKEND=auto`
+to return to the usual provider order. See [Parallel Search](https://docs.parallel.ai/integrations/mcp/search-mcp),
+the [terms](https://parallel.ai/customer-terms), and the [privacy policy](https://parallel.ai/privacy-policy).
 
 **Guard rails that keep it honest and safe:**
 - Tools that change something (timers, lists, memory, Home Assistant, Jellyfin, Hermes) never run for a
