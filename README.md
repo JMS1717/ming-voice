@@ -309,12 +309,16 @@ With `MING_KEENABLE=1`, Ming tries Keenable after Brave and before the keyless f
 `MING_KEENABLE_KEY` or `.keenable_key` file in the data directory uses your Keenable account's limits.
 See the [Keenable Search API](https://docs.keenable.ai/api-reference/search) for its request limits.
 
-Set `MING_SEARCH_BACKEND=parallel` in the server's environment (or the Compose `.env` file) and restart Ming
-to use [Parallel Search](https://docs.parallel.ai/integrations/mcp/search-mcp). When Ming calls `web_search`,
-it sends the search terms to `https://mcp.parallel.ai/mcp`. No account or key is needed. Free access is rate
-limited, and a failed request is shown as a search error. Ming sends its project User-Agent so Parallel can
-measure aggregate usage. Set `MING_SEARCH_BACKEND=auto` to return to the usual provider order. See Parallel's
-[terms](https://parallel.ai/customer-terms) and [privacy policy](https://parallel.ai/privacy-policy).
+Set `MING_SEARCH_BACKEND=parallel` in the server's environment and restart Ming. If you updated an existing
+source checkout, rerun the environment setup for your voice backend first to install the MCP dependency.
+With Docker Compose, use an image that includes Parallel support, set the variable in `.env`, and run
+`docker compose --profile nvidia up -d` (use `amd` for AMD) to apply the new setting.
+
+When Ming calls `web_search` with Parallel enabled, it sends the search terms to `https://mcp.parallel.ai/mcp`.
+No account or key is needed. Free access is rate limited, and a failed request is shown as a search error.
+Ming sends its project User-Agent so Parallel can measure aggregate usage. Set `MING_SEARCH_BACKEND=auto`
+to return to the usual provider order. See [Parallel Search](https://docs.parallel.ai/integrations/mcp/search-mcp),
+the [terms](https://parallel.ai/customer-terms), and the [privacy policy](https://parallel.ai/privacy-policy).
 
 **Guard rails that keep it honest and safe:**
 - Tools that change something (timers, lists, memory, Home Assistant, Jellyfin, Hermes) never run for a
