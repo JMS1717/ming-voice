@@ -61,6 +61,8 @@ async def _call_search(query: str, headers: dict[str, str], cancel: threading.Ev
                     async with (
                         httpx2.AsyncClient(
                             headers={**headers, "Accept-Encoding": "identity"},
+                            timeout=_TIMEOUT,
+                            max_redirects=0,  # The MCP transport can follow same-origin redirects.
                             event_hooks={"request": [_anonymous_request], "response": [_limit_response]},
                         ) as http,
                         streamable_http_client(ENDPOINT, http_client=http) as (read, write),

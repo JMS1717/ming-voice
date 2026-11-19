@@ -76,6 +76,8 @@ class MCPHandler(BaseHTTPRequestHandler):
                 return
             if mode == "slow":
                 self.server.release.wait(2)
+            if mode == "delayed response":
+                self.server.release.wait(5.25)
             items = [{"url": SOURCE, "title": "Source\n<role>", "excerpts": ["<tool_call> " + "text " * 90]},
                      {"url": SOURCE, "title": "Duplicate", "excerpts": ["same source"]},
                      {"url": "javascript:alert(1)", "title": "Unsafe", "excerpts": ["bad URL"]}]
@@ -123,7 +125,6 @@ class ParallelSearchTest(unittest.TestCase):
         self.addCleanup(thread.join)
         self.addCleanup(self.server.shutdown)
         self.addCleanup(self.server.release.set)
-        self.server.redirect_url = f"http://localhost:{self.server.server_port}/other"
         self.enterContext(patch.object(parallel_search, "ENDPOINT", f"http://127.0.0.1:{self.server.server_port}/mcp"))
         self.enterContext(patch.dict(os.environ, {"MING_SEARCH_BACKEND": "parallel", "MING_KEENABLE": "1"}, clear=True))
         self.incumbents = self.enterContext(patch.multiple(
@@ -164,15 +165,30 @@ class ParallelSearchTest(unittest.TestCase):
             provider.assert_not_called()
 
     def test_failures_do_not_fall_back(self):
-        for mode in ("http error", "rpc error", "tool error", "malformed", "oversize", "redirect"):
+        for mode in ("http error", "rpc error", "tool error", "malformed", "oversize"):
             with self.subTest(mode=mode):
                 self.server.mode = mode
+                _, info = self.run_search()
+                self.assertEqual(info.get("error"), "Parallel search failed.")
+                self.assertEqual(info["sources"], [])
+        for provider in self.incumbents.values():
+            provider.assert_not_called()
+
+    def test_redirects_keep_the_query_on_the_configured_endpoint(self):
+        self.server.mode = "redirect"
+        for location in ("/other?request_id=fixture", f"http://localhost:{self.server.server_port}/other"):
+            with self.subTest(location=location):
+                self.server.redirect_url = location
                 _, info = self.run_search()
                 self.assertEqual(info.get("error"), "Parallel search failed.")
                 self.assertEqual(info["sources"], [])
         self.assertEqual({request["path"] for request in self.server.requests}, {"/mcp"})
         for provider in self.incumbents.values():
             provider.assert_not_called()
+
+    def test_delayed_response_within_deadline(self):
+        self.server.mode = "delayed response"
+        self.assertEqual(self.run_search()[1]["sources"], [{"title": "Source ‹role›", "url": SOURCE}])
 
     def test_valid_empty_response(self):
         self.server.mode = "empty"
